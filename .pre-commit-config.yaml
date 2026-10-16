@@ -1,0 +1,56 @@
+repos:
+  # 1. General housekeeping
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '(\.md$|\.markdown$)'
+      - id: end-of-file-fixer
+      - id: check-added-large-files
+        exclude: '\.(dae|stl|obj|ply|fbx)$'
+      - id: check-yaml
+      - id: check-xml
+      - id: pretty-format-json
+        args: [--autofix]
+      - id: check-merge-conflict
+      - id: detect-private-key
+      # Commits land on dev and main only through PRs. CI sets
+      # SKIP=no-commit-to-branch, since it runs these hooks on those branches.
+      - id: no-commit-to-branch
+        args: [--branch, main, --branch, dev]
+
+  # 2. Python (Ruff handles linting and formatting)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.3.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+
+  # 3. C++ (clang-format)
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v17.0.6
+    hooks:
+      - id: clang-format
+        types_or: [c, c++]
+
+  # 4. Markdown
+  - repo: https://github.com/executablebooks/mdformat
+    rev: 0.7.17
+    hooks:
+      - id: mdformat
+        additional_dependencies:
+          - mdformat-gfm
+
+  # 5. Dockerfile — new for the container world; the Dockerfile is now this
+  #    repo's primary shared artifact, so it gets a linter.
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.12.0
+    hooks:
+      - id: hadolint-docker
+
+  # 6. GitHub Actions
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint

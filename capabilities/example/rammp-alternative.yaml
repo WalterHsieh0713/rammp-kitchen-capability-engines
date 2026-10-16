@@ -1,0 +1,22 @@
+# This capability's contract, as code: sheppy's `alternative` schema plus
+# RAMMP's `tier` (and `implements`, once a role contract exists). It is
+# transcribed into rammp-deployments/december_2026/sheppy-manifest.yaml.
+#
+# Keys under `container:` are the compose subset sheppy supports: image,
+# command, entrypoint, environment, env_file, network_mode, volumes, devices,
+# gpus, privileged, cap_add, cap_drop, ports, user, working_dir. Declare
+# hardware here, never in a README step. Do not set RMW_IMPLEMENTATION or
+# CYCLONEDDS_URI; rammp-base owns them.
+id: example_real
+tier: experimental
+kind: docker
+container:
+  # :dev is mutable and overwritten on every merge to dev. A demo profile needs
+  # a release tag or digest; `tier: demo-ready` is rejected without one.
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/example:dev
+  network_mode: host
+  ipc: host
+params:
+  publish_rate_hz: 1.0
+publishes: [/example/status]
+subscribes: []
