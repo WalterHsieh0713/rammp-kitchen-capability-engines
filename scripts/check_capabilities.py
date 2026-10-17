@@ -5,7 +5,7 @@ Each capability is one RAMMP module: its own image, its own real and mock
 fragments, its own docs page and owner. This is the gate that keeps them that
 way, on top of validate_fragment.py (the template's per-fragment schema check):
 
-- the four required files exist
+- the required files exist, including a package.xml (colcon-buildable)
 - both fragments are schema-valid and point at this capability's image
 - the mock speaks exactly the real alternative's interface
 - every FROM pins a versioned rammp-base / rammp-cuda image
@@ -27,6 +27,7 @@ ROOT = Path(__file__).resolve().parent.parent
 CAPABILITIES = ROOT / "capabilities"
 IMAGE_PREFIX = "ghcr.io/rammp-org/rammp-kitchen-capability-engines/"
 REQUIRED = (
+    "package.xml",
     "Dockerfile",
     "rammp-alternative.yaml",
     "rammp-alternative.mock.yaml",

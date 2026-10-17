@@ -6,8 +6,8 @@ SHEPPY = sheppy @ git+https://github.com/rammp-org/sheppy@main
 # STANDALONE=1 runs without the orchestrator; MOCK=1 skips hardware.
 STANDALONE ?= 0
 MOCK ?= 0
-ROS_ARGS = --ros-args -p use_orchestrator:=$(if $(filter 1,$(STANDALONE)),false,true) \
-	-p mock:=$(if $(filter 1,$(MOCK)),true,false)
+LAUNCH_ARGS = use_orchestrator:=$(if $(filter 1,$(STANDALONE)),false,true) \
+	mock:=$(if $(filter 1,$(MOCK)),true,false)
 ACTION ?=
 PARAMS ?= {}
 
@@ -17,9 +17,9 @@ PARAMS ?= {}
 new:
 	@test ! -e capabilities/$(CAP) || (echo "capabilities/$(CAP) already exists" && exit 1)
 	cp -r capabilities/example capabilities/$(CAP)
-	mv capabilities/$(CAP)/example_node.py capabilities/$(CAP)/$(CAP)_node.py
-	grep -rl example capabilities/$(CAP) | xargs sed -i -e 's/example_node/$(CAP)_node/g' \
-		-e 's/example/$(CAP)/g' -e 's/Example/$(CAP)/g'
+	cd capabilities/$(CAP) && mv example $(CAP) && mv resource/example resource/$(CAP) \
+		&& mv launch/example.launch.py launch/$(CAP).launch.py
+	grep -rl -i example capabilities/$(CAP) | xargs sed -i -e 's/example/$(CAP)/g' -e 's/Example/$(CAP)/g'
 	printf '/capabilities/%s/  @%s\n' $(CAP) "$$(gh api user --jq .login 2>/dev/null || echo OWNER)" \
 		>> .github/CODEOWNERS
 	@echo "Created capabilities/$(CAP). Check the owner line in .github/CODEOWNERS."
@@ -29,7 +29,7 @@ build:
 
 run:
 	docker run --rm -it --network host --ipc host -e ROS_DOMAIN_ID=$(ROS_DOMAIN_ID) \
-		$(IMAGE):$(TAG) python3 /app/$(CAP)_node.py $(ROS_ARGS)
+		$(IMAGE):$(TAG) ros2 launch $(CAP) $(CAP).launch.py $(LAUNCH_ARGS)
 
 # Send one action to a running capability, as the orchestrator would:
 #   make action CAP=example ACTION=count PARAMS='{"to": 5}'

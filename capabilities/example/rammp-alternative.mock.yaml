@@ -8,6 +8,6 @@ container:
   image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/example:dev
   network_mode: host
   ipc: host
-  command: ["python3", "/app/example_node.py", "--ros-args", "-p", "mock:=true"]
+  command: ["ros2", "launch", "example", "example.launch.py", "mock:=true"]
 publishes: [/example/status]
 subscribes: []

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Reference capability: one action, `count`, that counts up with progress.
 
 Copy this directory with `make new CAP=<name>` and replace `count` with your
@@ -6,9 +5,9 @@ capability's actions. Everything orchestrator-facing (registration, the
 activate/execute/control/hibernate servers, /example/status, SIGTERM) comes
 from capability_engine.CapabilityEngine.
 
-    make run CAP=example                  # registers with the orchestrator
-    make run CAP=example STANDALONE=1     # no orchestrator needed
-    make action CAP=example ACTION=count PARAMS='{"to": 5}'
+    ros2 launch example example.launch.py                          # with the orchestrator
+    ros2 launch example example.launch.py use_orchestrator:=false  # standalone
+    make action CAP=example ACTION=count PARAMS='{"to": 5}'        # send it a goal
 """
 
 import time
