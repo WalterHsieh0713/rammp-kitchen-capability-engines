@@ -24,6 +24,24 @@ make smoke CAP=button_press   # publishes what it declares, exits on SIGTERM
 make lint                     # pre-commit run --all-files
 ```
 
+## Standalone or with the orchestrator
+
+Every capability is a `capability_engine.CapabilityEngine`: it implements the
+[RAMMP orchestrator](https://github.com/rammp-org/rammp-orchestrator)'s engine
+contract (register, activate, execute_action, control, hibernate) and only
+writes its own `execute()`. The same image runs either way:
+
+```bash
+make run CAP=example                  # registers with the orchestrator; waits for it if absent
+make run CAP=example STANDALONE=1     # no orchestrator; MOCK=1 also skips hardware
+make action CAP=example ACTION=count PARAMS='{"to": 5}'   # send a goal, as the orchestrator would
+```
+
+Standalone, the orchestrator calls a capability makes (`ctx.request_intent`,
+`ctx.write_world_state`, `ctx.update_object`) are logged and skipped. Arm control
+arbitration (`AcquireControl`) is not wired in yet: the orchestrator does not
+call it today.
+
 To run it on the robot, transcribe the capability's two fragments into
 [`rammp-deployments`](https://github.com/rammp-org/rammp-deployments)'s
 `december_2026/sheppy-manifest.yaml` as a node with both alternatives.

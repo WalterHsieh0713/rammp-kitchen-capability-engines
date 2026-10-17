@@ -1,52 +1,66 @@
 #!/usr/bin/env python3
-"""Reference capability: publishes a 1 Hz status topic and exits on SIGTERM.
+"""Reference capability: one action, `count`, that counts up with progress.
 
-Copy this directory with `make new CAP=<name>` and replace this file with your
-capability. Keep the two things it demonstrates: a status topic published from
-the moment the node starts, and the SIGTERM handler.
+Copy this directory with `make new CAP=<name>` and replace `count` with your
+capability's actions. Everything orchestrator-facing (registration, the
+activate/execute/control/hibernate servers, /example/status, SIGTERM) comes
+from capability_engine.CapabilityEngine.
+
+    make run CAP=example                  # registers with the orchestrator
+    make run CAP=example STANDALONE=1     # no orchestrator needed
+    make action CAP=example ACTION=count PARAMS='{"to": 5}'
 """
 
-import signal
-import sys
+import time
 
-import rclpy
-from rclpy.executors import ExternalShutdownException
-from rclpy.node import Node
-from std_msgs.msg import String
+from capability_engine import Action, CapabilityEngine, EngineError, run
 
 
-class Example(Node):
-    def __init__(self, mock: bool) -> None:
+class Capability(CapabilityEngine):
+    display_name = "Example"
+    # Activated when the user selects one of these perception classes.
+    perception_classes = ["counter"]
+    # Resources the orchestrator locks while an action runs: "arm", "base",
+    # "gripper". This example touches no hardware.
+    required_resources = []
+    actions = [
+        Action(
+            "count",
+            "Count up",
+            params_schema={
+                "type": "object",
+                "properties": {
+                    "to": {"type": "integer", "minimum": 1, "default": 3},
+                    "interval_s": {"type": "number", "minimum": 0, "default": 1.0},
+                },
+            },
+        )
+    ]
+
+    def __init__(self):
         super().__init__("example")
-        self.declare_parameter("publish_rate_hz", 1.0)
-        rate = self.get_parameter("publish_rate_hz").value
-        self.label = "mock" if mock else "real"
-        self.publisher = self.create_publisher(String, "/example/status", 10)
-        self.create_timer(1.0 / rate, self.tick)
-        self.get_logger().info(f"example capability up ({self.label})")
 
-    def tick(self) -> None:
-        # State goes out on a timer; the log does not, or it floods sheppy's view.
-        message = String()
-        message.data = f"ok ({self.label})"
-        self.publisher.publish(message)
+    def execute(self, action_id, params, ctx):
+        to = int(params.get("to", 3))
+        interval = float(params.get("interval_s", 1.0))
+        if to < 1:
+            raise EngineError("bad_params", "'to' must be at least 1", recoverable=True)
+
+        for n in range(1, to + 1):
+            ctx.checkpoint()  # honours pause and cancel between steps
+            # A real capability would command hardware here, unless self.mock.
+            time.sleep(interval)
+            ctx.progress("counting", 100.0 * n / to, f"{n}/{to}")
+
+        # A capability that changes the world reports it, e.g.
+        # ctx.update_object(self.instance_id, opened=True) or
+        # ctx.write_world_state(gripper={"holding": "cup_1"}).
+
+        return {"counted_to": to}
 
 
-def main() -> None:
-    rclpy.init()
-    node = Example(mock="--mock" in sys.argv)
-
-    # A container's PID 1 receives no default action for SIGTERM, so without
-    # this handler `docker stop` — and every `sheppy woof` — would wait out the
-    # full grace period and then SIGKILL. `make smoke` fails without it.
-    signal.signal(signal.SIGTERM, lambda *_: rclpy.try_shutdown())
-
-    try:
-        rclpy.spin(node)
-    except (KeyboardInterrupt, ExternalShutdownException):
-        pass
-    finally:
-        rclpy.try_shutdown()
+def main():
+    run(Capability)
 
 
 if __name__ == "__main__":
