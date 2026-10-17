@@ -9,14 +9,16 @@
 
 ## What it does
 
-One paragraph. What job does this module do in the system, and what would break
-if it were missing?
+The reference capability. It offers one action, `count`, which counts up to
+`to` with progress feedback and honours pause and cancel. It is activated when
+the user selects a `counter`. Replace this paragraph with what your capability
+does and what would break without it.
 
 ## Publishes
 
-| Topic             | Type              | Rate | Meaning                                                         |
-| ----------------- | ----------------- | ---- | --------------------------------------------------------------- |
-| `/example/status` | `std_msgs/String` | 1 Hz | Health topic; the payload names the alternative that is running |
+| Topic             | Type              | Rate | Meaning                                                                                                   |
+| ----------------- | ----------------- | ---- | --------------------------------------------------------------------------------------------------------- |
+| `/example/status` | `std_msgs/String` | 1 Hz | Health topic: JSON `state` (idle/executing/paused), `action`, `instance_id`, `mode`, `registered`, `mock` |
 
 ## Subscribes
 
@@ -24,11 +26,30 @@ if it were missing?
 | ----- | ---- | -------- | ---------------------------- |
 | —     | —    | —        | This module consumes nothing |
 
+## Orchestrator interface
+
+Served under `/example/`, types from `rammp_orchestrator_interfaces`:
+
+| Name                      | Type                   | Meaning                                       |
+| ------------------------- | ---------------------- | --------------------------------------------- |
+| `/example/activate`       | `srv/Activate`         | Which actions are available for the selection |
+| `/example/execute_action` | `action/ExecuteAction` | Run an action; progress as feedback           |
+| `/example/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
+| `/example/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
+
+| Action  | Params                                                | Result payload      |
+| ------- | ----------------------------------------------------- | ------------------- |
+| `count` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}` |
+
+Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
+the orchestrator is up.
+
 ## Parameters
 
-| Name              | Default | Meaning                 |
-| ----------------- | ------- | ----------------------- |
-| `publish_rate_hz` | `1.0`   | Status publication rate |
+| Name               | Default | Meaning                                                   |
+| ------------------ | ------- | --------------------------------------------------------- |
+| `use_orchestrator` | `true`  | `false` runs standalone: no registration, drive it by CLI |
+| `mock`             | `false` | `true` skips hardware (the mock alternative sets it)      |
 
 ## Hardware
 

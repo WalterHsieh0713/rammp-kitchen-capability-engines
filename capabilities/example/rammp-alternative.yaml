@@ -16,7 +16,5 @@ container:
   image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/example:dev
   network_mode: host
   ipc: host
-params:
-  publish_rate_hz: 1.0
 publishes: [/example/status]
 subscribes: []
