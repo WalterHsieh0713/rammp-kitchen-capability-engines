@@ -1,0 +1,5 @@
+# Every capability names its owner here; check_capabilities.py fails without a
+# line for /capabilities/<name>/. Owners approve PRs touching their capability.
+
+*                       @SwapnilPande
+/capabilities/example/  @SwapnilPande

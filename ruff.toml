@@ -1,0 +1,12 @@
+# Ruff config for the pre-commit hooks. Beyond the defaults (E, F): import
+# order, bugbear, pyupgrade, and no print() — ROS nodes log through
+# get_logger(), so a print is almost always leftover debugging.
+target-version = "py310"  # ROS 2 Humble's Python
+line-length = 100
+
+[lint]
+select = ["E", "F", "W", "I", "B", "UP", "T20"]
+
+[lint.per-file-ignores]
+"scripts/*" = ["T20"]
+"tests/*" = ["T20"]

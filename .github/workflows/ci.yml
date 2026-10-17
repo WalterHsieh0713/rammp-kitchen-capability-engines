@@ -1,0 +1,114 @@
+name: Capabilities
+
+on:
+  push:
+    branches: [main, dev]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-22.04
+    outputs:
+      capabilities: ${{ steps.list.outputs.capabilities }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # sheppy from git at @main, as rammp-deployments does: it has never cut a
+      # release, and a fragment that only loads against an older sheppy than
+      # the one on the robot tells us nothing. Pin it once sheppy tags one.
+      - name: Install checker dependencies
+        run: pip install pyyaml pytest "sheppy @ git+https://github.com/rammp-org/sheppy@main"
+
+      - name: Unit-test the checkers
+        run: pytest -q tests
+
+      - name: Check every capability against the repo rules and sheppy
+        run: python3 scripts/check_capabilities.py
+
+      - id: list
+        name: List capabilities for the build matrix
+        run: |
+          echo "capabilities=$(find capabilities -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
+            | sort | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  smoke:
+    needs: checks
+    # Native arm64: rammp-base is arm64-only, and so are abra and the demo machine.
+    runs-on: ubuntu-22.04-arm
+    strategy:
+      fail-fast: false
+      matrix:
+        capability: ${{ fromJSON(needs.checks.outputs.capabilities) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the image
+        run: docker build -f "capabilities/${{ matrix.capability }}/Dockerfile" -t capability:ci .
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Publishes what it declares, and exits on SIGTERM
+        run: |
+          pip install pyyaml
+          python3 scripts/smoke.py "${{ matrix.capability }}" capability:ci
+
+      - id: repo
+        if: github.event_name != 'pull_request'
+        name: Compute lowercase image name
+        run: echo "name=${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - id: meta
+        if: github.event_name != 'pull_request'
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ steps.repo.outputs.name }}/${{ matrix.capability }}
+          tags: |
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha,format=long
+
+      - if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Push the exact image that just passed smoke, rather than rebuilding it.
+      - if: github.event_name != 'pull_request'
+        name: Publish
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          for tag in $TAGS; do
+            docker tag capability:ci "$tag"
+            docker push "$tag"
+          done
+
+  # The single check the branch rulesets require, so adding a capability (a
+  # new matrix entry) never needs a ruleset edit.
+  ci-ok:
+    needs: [checks, smoke]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - name: All capability jobs passed
+        run: |
+          [ "${{ needs.checks.result }}" = success ] && [ "${{ needs.smoke.result }}" = success ]

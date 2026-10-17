@@ -1,0 +1,10 @@
+# Images build from the repo root, so keep the context to source only.
+.git
+.github
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+build/
+install/
+log/
