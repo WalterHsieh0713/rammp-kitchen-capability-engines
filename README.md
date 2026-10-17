@@ -29,12 +29,53 @@ make lint                     # pre-commit run --all-files
 Every capability is a `capability_engine.CapabilityEngine`: it implements the
 [RAMMP orchestrator](https://github.com/rammp-org/rammp-orchestrator)'s engine
 contract (register, activate, execute_action, control, hibernate) and only
-writes its own `execute()`. The same image runs either way:
+writes its own `execute()`. Every capability, and `capability_engine` itself,
+is an `ament_python` package, so it builds natively with colcon or in its image,
+and both run the same launch file with the same two switches:
+`use_orchestrator:=false` (standalone) and `mock:=true` (no hardware).
+
+### Natively with colcon (the RAMMP hybrid workflow)
+
+Clone into the workspace from [developer setup](https://rammp-org.github.io/setup/),
+next to `rammp-interfaces-ros2` (at a version that carries
+`rammp_orchestrator_interfaces`, currently its `dev` branch):
 
 ```bash
-make run CAP=example                  # registers with the orchestrator; waits for it if absent
-make run CAP=example STANDALONE=1     # no orchestrator; MOCK=1 also skips hardware
-make action CAP=example ACTION=count PARAMS='{"to": 5}'   # send a goal, as the orchestrator would
+cd ~/ros2_ws/src
+git clone git@github.com:rammp-org/rammp-kitchen-capability-engines.git
+cd ~/ros2_ws
+rosdep install --from-paths src --ignore-src -y
+colcon build --packages-up-to example
+source install/setup.bash
+
+ros2 launch example example.launch.py                          # registers with the orchestrator; waits for it if absent
+ros2 launch example example.launch.py use_orchestrator:=false  # standalone; add mock:=true to skip hardware
+```
+
+Edit, `colcon build --packages-select example`, relaunch. No image involved.
+To have sheppy start your build, add a local `kind: launch_file` alternative as in
+[hybrid workflow](https://rammp-org.github.io/development/hybrid/) (an uncommitted
+edit to your manifest).
+
+### In the image
+
+```bash
+make build CAP=example                # arm64 host
+make run CAP=example                  # with the orchestrator
+make run CAP=example STANDALONE=1     # standalone; MOCK=1 skips hardware
+```
+
+### Sending it an action
+
+Either way, drive a running capability as the orchestrator would:
+
+```bash
+make action CAP=example ACTION=count PARAMS='{"to": 5}'
+# or natively:
+ros2 action send_goal --feedback /example/execute_action rammp_orchestrator_interfaces/action/ExecuteAction \
+  '{engine_id: example, action_id: count, params_json: "{\"to\": 5}"}'
+ros2 service call /example/control rammp_orchestrator_interfaces/srv/Control '{command: 0}'  # 0 pause, 1 resume, 2 cancel
+ros2 topic echo /example/status
 ```
 
 Standalone, the orchestrator calls a capability makes (`ctx.request_intent`,
@@ -49,12 +90,15 @@ To run it on the robot, transcribe the capability's two fragments into
 ## A capability
 
 ```
-capabilities/<name>/
+capability_engine/               shared ament_python package: the orchestrator engine contract
+capabilities/<name>/             one ament_python package per capability (`make new CAP=<name>`)
+  package.xml, setup.py, setup.cfg
+  <name>/node.py                the capability: a CapabilityEngine subclass
+  launch/<name>.launch.py       what both the native build and the image run
   Dockerfile                    FROM a pinned rammp-base / rammp-cuda version, built from the repo root
   rammp-alternative.yaml        the real alternative: sheppy's schema plus `tier`
   rammp-alternative.mock.yaml   same topics, no hardware — CI smoke-tests this one
   docs/interface.md             the page rammp-docs pulls; keep its headings
-  ...                           your code
 ```
 
 plus an owner line in `.github/CODEOWNERS`.

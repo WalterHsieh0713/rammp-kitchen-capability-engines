@@ -97,7 +97,10 @@ def main(capability, image):
         elapsed = time.monotonic() - start
         if elapsed >= GRACE_S:
             print(f"FAIL: did not exit on SIGTERM within {GRACE_S}s ({elapsed:.1f}s)")
-            print("      A container that ignores SIGTERM makes every 'sheppy woof' a stall.")
+            print(
+                "      A container that ignores its stop signal makes every 'sheppy woof' a stall."
+            )
+            print("      Running `ros2 launch` as CMD? Add `STOPSIGNAL SIGINT` to the Dockerfile.")
             return 1
     finally:
         docker("rm", "-f", name, check=False)
