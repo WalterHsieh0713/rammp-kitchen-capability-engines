@@ -14,6 +14,37 @@ import yaml
 TIERS = ("experimental", "integrated", "supported", "demo-ready")
 
 
+def params_errors(fragment):
+    """`params:` that would never reach the node.
+
+    sheppy appends `--ros-args --params-file /sheppy/params.yaml` to the
+    command. With no `command:` those args replace the image's CMD, and the
+    rammp-base entrypoint then has no node to run. `ros2 launch` rejects them
+    ("unrecognized arguments").
+    """
+    params = fragment.get("params")
+    if params is None:
+        return []
+    if not isinstance(params, dict):
+        return ["'params' must be a mapping of parameter name to default"]
+    if not params:
+        return []
+    container = fragment.get("container")
+    command = container.get("command") if isinstance(container, dict) else None
+    if not command:
+        return [
+            "'params' needs an explicit 'container.command' that runs the node: "
+            "sheppy's appended --ros-args would otherwise replace the image's CMD"
+        ]
+    words = command.split() if isinstance(command, str) else [str(w) for w in command]
+    if any(w == "launch" or w.endswith((".launch.py", ".launch.xml")) for w in words):
+        return [
+            "'params' with a 'ros2 launch' command: ros2 launch rejects the "
+            "--ros-args sheppy appends; run the node's executable instead"
+        ]
+    return []
+
+
 def validate(fragment):
     """Return a list of human-readable problems. Empty means valid."""
     if not isinstance(fragment, dict):
@@ -39,6 +70,8 @@ def validate(fragment):
         errors.append("'container' is required and must be a mapping")
     elif not isinstance(container.get("image"), str) or not container.get("image"):
         errors.append("'container.image' is required and must be a non-empty string")
+
+    errors += params_errors(fragment)
 
     for key in ("publishes", "subscribes"):
         topics = fragment.get(key, [])

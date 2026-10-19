@@ -51,3 +51,15 @@ paths: take hosts and paths as ROS parameters, and keep experiments on your
 branch or in your own repo. Runtime behaviour follows the
 [RAMMP patterns](https://rammp-org.github.io/patterns/): never exit because a
 peer is absent, publish status from startup, exit on SIGTERM.
+
+## Parameters
+
+Declare each ROS parameter with its default under `params:` in both fragments,
+and list it in `docs/interface.md`. Deployments set per-robot values by
+overriding those keys in a profile, so anything not listed there cannot be
+changed without editing the manifest. sheppy appends
+`--ros-args --params-file` to the container's command, so a fragment with
+`params:` needs an explicit `command:` that runs the node's executable, not
+`ros2 launch`; `validate_fragment.py` enforces both. Large configuration ships in
+the image, chosen by a parameter. See
+[Configuring a deployment](https://rammp-org.github.io/configuring-a-deployment).

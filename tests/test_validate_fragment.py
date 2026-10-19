@@ -85,3 +85,26 @@ def test_every_documented_tier_is_accepted(tier):
     fragment = minimal()
     fragment["tier"] = tier
     assert validate(fragment) == []
+
+
+def test_params_need_an_explicit_command():
+    # sheppy's appended --ros-args would replace the image's CMD.
+    fragment = minimal()
+    fragment["params"] = {"publish_rate_hz": 1.0}
+    assert any("container.command" in error for error in validate(fragment))
+
+    fragment["container"]["command"] = ["python3", "/app/example_node.py"]
+    assert validate(fragment) == []
+
+
+def test_params_with_a_launch_command_are_reported():
+    fragment = minimal()
+    fragment["params"] = {"publish_rate_hz": 1.0}
+    fragment["container"]["command"] = "ros2 launch example example.launch.py"
+    assert any("ros2 launch" in error for error in validate(fragment))
+
+
+def test_params_must_be_a_mapping():
+    fragment = minimal()
+    fragment["params"] = ["publish_rate_hz"]
+    assert any("'params' must be a mapping" in error for error in validate(fragment))

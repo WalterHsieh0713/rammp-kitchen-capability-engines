@@ -2,7 +2,8 @@
 """Runtime smoke test for one capability, run against its mock alternative.
 
 Runs the image the way sheppyd will (no --init, host networking, the mock's
-command) and checks the three things every other container relies on:
+command and its `params:` as a params file) and checks the three things every
+other container relies on:
 
 1. it stays up rather than exiting because a peer or device is absent
 2. every topic its fragment declares in `publishes` actually appears
@@ -17,6 +18,7 @@ Usage: smoke.py <capability> <image>
 import random
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -49,6 +51,17 @@ def main(capability, image):
     domain = str(random.randint(1, 100))
     name = f"rammp-smoke-{capability}-{domain}"
 
+    # sheppy's params delivery: a file keyed by ros_node_name (or /**), and
+    # --ros-args --params-file appended to the command.
+    mount = []
+    if mock.get("params"):
+        key = mock.get("ros_node_name") or "/**"
+        params = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
+        yaml.safe_dump({key: {"ros__parameters": mock["params"]}}, params)
+        params.close()
+        mount = ["-v", f"{params.name}:/sheppy/params.yaml:ro"]
+        command += ["--ros-args", "--params-file", "/sheppy/params.yaml"]
+
     docker(
         "run",
         "-d",
@@ -59,6 +72,7 @@ def main(capability, image):
         "host",
         "-e",
         f"ROS_DOMAIN_ID={domain}",
+        *mount,
         image,
         *command,
     )

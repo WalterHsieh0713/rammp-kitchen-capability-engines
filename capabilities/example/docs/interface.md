@@ -26,6 +26,10 @@ if it were missing?
 
 ## Parameters
 
+ROS parameters, declared with defaults under `params:` in both fragments. A
+deployment sets one per robot with an `overrides:` entry in its profile; sheppy
+passes them as a params file.
+
 | Name              | Default | Meaning                 |
 | ----------------- | ------- | ----------------------- |
 | `publish_rate_hz` | `1.0`   | Status publication rate |
