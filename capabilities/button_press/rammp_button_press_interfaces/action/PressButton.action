@@ -1,0 +1,16 @@
+# Press one button on the Comfee microwave panel with RAMMP's arm (served by
+# rammp_button_press/press_server). The server moves the arm ONLY if it was started with
+# allow_execute:=true; otherwise every goal runs as a dry run (detect + plan + gate every leg,
+# nothing moves) and the result says so.
+string target            # start_30s | timer_clock | stop_eco | power_level | wgt_time_defrost
+uint8 presses 1          # 0 = go to the pre-press spot and back without pressing
+float64 press_in_m 0.0   # how far to push from the pre-press spot; 0 = the package default; max 0.03
+bool execute false       # false = dry run
+bool no_return false     # true = stay at the pre-press spot at the end
+---
+bool success             # true = finished (a dry run that passed every gate counts)
+bool moved               # true if the arm was commanded at all
+string message           # "done", or why it stopped -- "... HOLDING HERE" = the arm holds where it is
+string log_file          # the run's JSONL log on the server machine
+---
+string stage             # one progress line, as press_button prints it

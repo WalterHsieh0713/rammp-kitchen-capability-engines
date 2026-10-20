@@ -1,0 +1,8 @@
+# Every repo rule, at 120 columns instead of 100: this code's log and abort messages carry the
+# measurements behind each limit, and ~190 of them would otherwise be split by hand.
+extend = "../../ruff.toml"
+line-length = 120
+
+[lint.per-file-ignores]
+# Offline analysis scripts, run on a laptop against run logs (like the repo's scripts/).
+"rammp_button_press/tools/*" = ["T20"]

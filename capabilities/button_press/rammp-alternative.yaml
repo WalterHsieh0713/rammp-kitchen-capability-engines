@@ -1,0 +1,61 @@
+# The microwave button press: the /press_button action server
+# (rammp_button_press_interfaces/action/PressButton). Transcribed into
+# rammp-deployments/december_2026/sheppy-manifest.yaml.
+#
+# NEEDS, from the rest of the manifest (flatbot profile): the arm, arm_state_publisher and
+# planner on the NIGHTLY channel (arm_mount frame, arm_ joint names), static_tf (the camera
+# mounts), and both OAK cameras. Params below are flatbot's; on a level mount with the 1.1.0
+# arm, override arm_frame: base_link, joint_prefix: "", mount_rpy_deg: [0.0, 0.0, 0.0].
+id: button_press_real
+tier: experimental
+kind: docker
+ros_node_name: button_press
+container:
+  # :dev is mutable and overwritten on every merge to dev. A demo profile needs
+  # a release tag or digest; `tier: demo-ready` is rejected without one.
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/button_press:dev
+  network_mode: host
+  ipc: host
+  # Keep the run logs (one JSONL per goal) on the host.
+  volumes:
+    - /tmp/button_press_logs:/logs
+  # The node's executable: sheppy appends --ros-args --params-file to it.
+  command: ["/module_ws/install/rammp_button_press/lib/rammp_button_press/press_server"]
+params:
+  # false: every goal is a dry run (detect, plan, gate; nothing moves), whatever it asks.
+  # true only for attended runs, someone on the e-stop.
+  allow_execute: false
+  acquire_control: false # true where the driver runs arbitration_mode: enforced
+  # flatbot: the run works in arm_mount (z up), the arm base pitched 30 deg in it (mount.yaml).
+  arm_frame: arm_mount
+  joint_prefix: arm_
+  mount_rpy_deg: [0.0, 30.0, 0.0]
+  # "" = the colour image's own frame_id. Depth must be aligned to colour.
+  camera_frame: ""
+  camera_ns: /wrist_camera
+  depth_topic: depth/image_rect_raw
+  # First look from the scene camera, falling back to the wrist camera.
+  far: scene
+  scene_ns: /scene_camera
+  scene_depth_topic: depth/image_rect_raw
+  log_dir: /logs
+publishes:
+  - /button_press/target_pose
+  - /setpoint/twist
+  - /setpoint/gripper
+subscribes:
+  - /joint_states
+  - /ee_state
+  - /gripper_state
+  - /control_status
+  - /diagnostics
+  - /tf
+  - /tf_static
+  - /wrist_camera/color/image_raw
+  - /wrist_camera/color/camera_info
+  - /wrist_camera/depth/image_rect_raw
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /scene_camera/depth/camera_info
+  - /yolo/detections

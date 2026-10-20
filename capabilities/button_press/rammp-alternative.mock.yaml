@@ -1,0 +1,45 @@
+# The mock: the real alternative's exact interface, no hardware. Every goal succeeds at
+# once (nothing detected or moved). Other teams develop against it, the all-mock profile
+# runs on it, and CI smoke-tests it.
+id: button_press_mock
+tier: experimental
+kind: docker
+ros_node_name: button_press
+container:
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/button_press:dev
+  network_mode: host
+  ipc: host
+  command: ["/module_ws/install/rammp_button_press/lib/rammp_button_press/press_server", "--mock"]
+params:
+  allow_execute: false
+  acquire_control: false
+  arm_frame: arm_mount
+  joint_prefix: arm_
+  mount_rpy_deg: [0.0, 30.0, 0.0]
+  camera_frame: ""
+  camera_ns: /wrist_camera
+  depth_topic: depth/image_rect_raw
+  far: scene
+  scene_ns: /scene_camera
+  scene_depth_topic: depth/image_rect_raw
+  log_dir: /tmp/press_logs
+publishes:
+  - /button_press/target_pose
+  - /setpoint/twist
+  - /setpoint/gripper
+subscribes:
+  - /joint_states
+  - /ee_state
+  - /gripper_state
+  - /control_status
+  - /diagnostics
+  - /tf
+  - /tf_static
+  - /wrist_camera/color/image_raw
+  - /wrist_camera/color/camera_info
+  - /wrist_camera/depth/image_rect_raw
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /scene_camera/depth/camera_info
+  - /yolo/detections
