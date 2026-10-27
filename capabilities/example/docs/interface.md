@@ -46,13 +46,13 @@ the orchestrator is up.
 
 ## Parameters
 
-ROS parameters, declared with defaults under `params:` in both fragments. A
+ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name              | Default | Meaning                 |
-| ----------------- | ------- | ----------------------- |
-| `publish_rate_hz` | `1.0`   | Status publication rate |
+| Name               | Default | Meaning                                                   |
+| ------------------ | ------- | --------------------------------------------------------- |
+| `publish_rate_hz`  | `1.0`   | Status publication rate                                   |
 | `use_orchestrator` | `true`  | `false` runs standalone: no registration, drive it by CLI |
 | `mock`             | `false` | `true` skips hardware (the mock alternative sets it)      |
 
