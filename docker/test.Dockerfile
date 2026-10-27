@@ -19,8 +19,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         ros-humble-kortex-description ros-humble-robotiq-description ros-humble-xacro \
     && rm -rf /var/lib/apt/lists/*
 
+# numpy, scipy and pybullet are pinned to the versions the SheppyArm goldens were recorded with
+# (pybullet 3.2.7 from PyPI reproduces the recorded pybullet-arm64 3.2.8 output exactly).
 # hadolint ignore=DL3013
-RUN pip install --no-cache-dir numpy scipy pybullet pytest
+RUN pip install --no-cache-dir numpy==1.26.4 scipy==1.14.0 pybullet==3.2.7 pytest
 
 # Fetch commit $2 of GitHub repo $1 into dir $3 (full SHA required for a shallow fetch).
 # hadolint ignore=SC2016
