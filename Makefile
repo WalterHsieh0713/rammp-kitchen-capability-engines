@@ -11,7 +11,7 @@ LAUNCH_ARGS = use_orchestrator:=$(if $(filter 1,$(STANDALONE)),false,true) \
 ACTION ?=
 PARAMS ?= {}
 
-.PHONY: new build run action check smoke lint
+.PHONY: new build run action check smoke lint test-arm
 
 # Start a capability from the example: make new CAP=button_press
 new:
@@ -48,3 +48,13 @@ smoke:
 
 lint:
 	pre-commit run --all-files
+
+# self.arm tests, in an x86 ROS 2 Humble image with the repo mounted at /repo (edits need
+# no rebuild). Directories that do not exist yet are skipped. ARGS replaces the paths:
+#   make test-arm ARGS=tests/arm/test_sim.py -k golden
+ARM_TEST_IMAGE = rammp-arm-test:dev
+ARM_TEST_DIRS = $(wildcard capability_engine/test tests/arm)
+test-arm:
+	docker build -f docker/test.Dockerfile -t $(ARM_TEST_IMAGE) docker
+	docker run --rm --user $$(id -u):$$(id -g) -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
+		-v $(CURDIR):/repo $(ARM_TEST_IMAGE) python3 -m pytest -q -p no:cacheprovider $(or $(ARGS),$(ARM_TEST_DIRS))

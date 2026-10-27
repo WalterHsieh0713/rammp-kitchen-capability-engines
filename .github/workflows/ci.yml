@@ -46,6 +46,15 @@ jobs:
           echo "capabilities=$(find capabilities -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
             | sort | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
 
+  # self.arm: pure-Python and rclpy tests in the x86 test image (docker/test.Dockerfile).
+  arm-tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the test image and run the arm tests
+        run: make test-arm
+
   smoke:
     needs: checks
     # Native arm64: rammp-base is arm64-only, and so are abra and the demo machine.
@@ -105,10 +114,12 @@ jobs:
   # The single check the branch rulesets require, so adding a capability (a
   # new matrix entry) never needs a ruleset edit.
   ci-ok:
-    needs: [checks, smoke]
+    needs: [checks, arm-tests, smoke]
     if: always()
     runs-on: ubuntu-22.04
     steps:
       - name: All capability jobs passed
         run: |
-          [ "${{ needs.checks.result }}" = success ] && [ "${{ needs.smoke.result }}" = success ]
+          [ "${{ needs.checks.result }}" = success ] \
+            && [ "${{ needs.arm-tests.result }}" = success ] \
+            && [ "${{ needs.smoke.result }}" = success ]
