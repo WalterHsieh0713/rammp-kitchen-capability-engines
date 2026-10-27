@@ -176,6 +176,12 @@ public and used exactly as today.
   between motions *(Claude's call: a trajectory cannot be resumed mid-way with
   the same path)*. Cancel during a motion cancels the goal (or zeroes and closes
   the stream), waits for it to settle, and raises `Cancelled`.
+- **Mock mode** (`mock:=true`, the capability's mock alternative, no driver).
+  `self.arm` is a dry run: motions log "mock: not sent" and return success,
+  and the state is the last commanded joints, starting from a `mock_joints`
+  parameter, with the tool pose from the sim. *(Claude's call: the spec was
+  silent, and the mock alternative must run a capability's flow with no
+  hardware.)*
 - **Standalone (bench scripts).** `from sheppy_arm import SheppyArm;
   SheppyArm(node_name=...)` still works and is the same class, constructed with
   its own node as today, destroyed by `close()`, refusing to move under enforced
@@ -250,7 +256,7 @@ controller and gains), plus the token and the last `generation`.
 |---|---|
 | A goal requested while a stream is open, or a stream while a goal runs | Refuse with an error naming what is running. *(Claude's call: refuse rather than hand over. Sequential, blocking code never collides; a collision is almost always a bug.)* |
 | A different controller or gains than the open session | Not possible: sessions only exist inside `stream(...)`. Nested `stream` blocks are refused. |
-| `/stream_status` shows the session closed unexpectedly | Raise inside the `with` block with the cause: "your loop stopped sending for more than `timeout_s`" (deadline) or "the driver could not solve that pose" (IK fault). |
+| `/stream_status` shows the session closed unexpectedly | Raise inside the `with` block. `StreamStatus` carries no close cause, so the message names both: "your loop stopped sending for more than `timeout_s`, or the driver could not solve that pose". A follow-up asks the driver for the cause. |
 | `generation` changes, or a goal settles `-9 HALTED`, while holding the token | Stop, drop the token, raise "control taken by `<owner_id>`". Never re-acquire. |
 | `/control_status` shows e-stopped | Refuse every command with "e-stopped". |
 
@@ -446,6 +452,7 @@ their frames to `arm_mount` is an agreed contract.
 - kinova-gen3-ros2: the pose stream switching IK solutions, which contradicts the
   documented bounded IK step.
 - kinova-gen3-ros2: `/set_gains` is missing from `docs/interface.md`.
+- kinova-gen3-ros2: a close cause on `StreamStatus` (deadline vs IK fault).
 - kinova-gen3-driver: confirm the stale-stream hold ("FREEZES") on hardware.
 
 ## Left to the builder
