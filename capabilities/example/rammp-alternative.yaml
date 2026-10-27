@@ -16,10 +16,11 @@ container:
   image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/example:dev
   network_mode: host
   ipc: host
-  # Repeats the image's CMD. sheppy appends `--ros-args --params-file` to the
-  # command; with no command, those args replace the CMD and the node never
-  # starts. Run the node's executable, never `ros2 launch`, which rejects them.
-  command: ["python3", "/app/example_node.py"]
+  # Runs the same node as the image's CMD, without the launch file. sheppy
+  # appends `--ros-args --params-file` to the command; with no command, those
+  # args replace the CMD and the node never starts. Run the node's executable
+  # (`ros2 run`), never `ros2 launch`, which rejects them.
+  command: ["ros2", "run", "example", "example_node"]
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
