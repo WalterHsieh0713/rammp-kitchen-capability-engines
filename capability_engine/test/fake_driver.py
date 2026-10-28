@@ -14,13 +14,15 @@ action name in arm.py then fails the tests instead of being mirrored here. Test 
     state:        set_joints(q7), set_flange(pos, quat), set_gripper(pos), move_gripper_to(pos, s),
                   pause_publishing(), resume_publishing(), set_publish_rate(hz)
     arbitration:  enforce_arbitration(), seize(owner_id), engage_estop(status_delay_s=0.0)
-    goals:        accept(name, bool), delay_accept(seconds), set_result(name, code),
+    goals:        accept(name, bool), delay_accept(seconds), set_result(name, code, final_error),
                   set_result_after_cancel(name, code), hold_goals(seconds),
                   finish_at(name, joints=None, flange=None), cancelled(name)
     streams:      set_controllers([(name, channels, available)]), publish_stream_status(open)
     planner:      plan_result(points, joint_names=JOINTS)
 
-Every accepted driver goal (not the planner's) publishes one default feedback message as it starts.
+Every accepted driver goal (not the planner's) publishes one feedback message as it starts:
+fraction_complete FEEDBACK_FRACTION, actual = the joints, and on go_to goals phase "executing" and
+planner_state "fake".
 
 Also here: FakeCtx, which stands in for the engine's Context, and counts(node).
 """
@@ -76,6 +78,7 @@ STATE_HZ = 50.0  # /joint_states, /ee_state and /gripper_state
 DIAGNOSTICS_HZ = 1.0
 GOAL_POLL_S = 0.01  # how often a held goal checks for a cancel or a seize
 PLAN_DT_S = 0.1  # time between the points of a plan_result trajectory
+FEEDBACK_FRACTION = 0.5  # fraction_complete of the one feedback message a goal publishes
 PAUSE_POLL_S = 0.01  # how often a paused FakeCtx.checkpoint() looks for resume or cancel
 FLATBOT_URDF = Path("/fixtures/urdf/flatbot.urdf")
 FRAME = "arm_mount"
@@ -186,6 +189,7 @@ class FakeDriver(Node):
         # Goal outcomes, by action name.
         self._accept = {}
         self._results = {}
+        self._final_errors = {}
         self._results_after_cancel = {}
         self._finish = {}
         self._cancelled = set()
@@ -324,9 +328,11 @@ class FakeDriver(Node):
         """Goals are accepted or rejected this long after they arrive (default: at once)."""
         self._accept_delay_s = float(seconds)
 
-    def set_result(self, name, code):
-        """The error_code a goal of `name` finishes with when not cancelled (default 0)."""
+    def set_result(self, name, code, final_error=None):
+        """The error_code a goal of `name` finishes with when not cancelled (default 0), and the
+        final_error positions its result carries (default none)."""
         self._results[name] = code
+        self._final_errors[name] = list(final_error or [])
 
     def set_result_after_cancel(self, name, code):
         """The error_code a cancelled goal of `name` settles with (default -6 PREEMPTED)."""
@@ -388,7 +394,12 @@ class FakeDriver(Node):
     def _execute(self, name, handle):
         halts = self._halts
         if name not in PLANNER_ACTIONS:
-            handle.publish_feedback(ACTIONS[name][0].Feedback())
+            fb = ACTIONS[name][0].Feedback(fraction_complete=FEEDBACK_FRACTION)
+            with self._lock:
+                fb.actual.positions = list(self._joints)
+            if hasattr(fb, "phase"):  # the go_to goals
+                fb.phase, fb.planner_state = "executing", "fake"
+            handle.publish_feedback(fb)
         deadline = time.monotonic() + self._hold_s
         while (
             time.monotonic() < deadline and not handle.is_cancel_requested and self._halts == halts
@@ -416,6 +427,7 @@ class FakeDriver(Node):
         else:
             result.error_code = code
             result.error_string = ERRORS.get(code, "")
+            result.final_error.positions = self._final_errors.get(name, [])
         return result
 
     def _authorized(self, request):

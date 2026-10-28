@@ -83,14 +83,22 @@ GRIPPER_MOVED = 0.002  # gripper(): a position change (0..1) above this means th
 GRIPPER_JUDGE_AFTER_S = 0.5  # gripper(): the fingers are judged still only after this long
 GRIPPER_STILL_S = 0.3  # gripper(): still this long -> settled, the stream stops
 
-# The driver's goal fields, for the keyword arguments of the goal methods.
-HOLD_NONE = GoToEEPose.Goal.HOLD_NONE  # go_to_ee_pose: the planner reorients as it likes
-HOLD_LEVEL = GoToEEPose.Goal.HOLD_LEVEL  # keep the tool's tilt; spin about arm_mount z is free
-HOLD_FIXED = GoToEEPose.Goal.HOLD_FIXED  # keep the orientation entirely
-POSITION = GoToEEPose.Goal.CONTROL_MODE_POSITION  # control_mode: stiff position control
-IMPEDANCE = GoToEEPose.Goal.CONTROL_MODE_IMPEDANCE  # control_mode: compliant joint impedance
+# The driver's goal fields, for the keyword arguments of the goal methods (the driver's values).
+HOLD_NONE = 0  # go_to_ee_pose orientation_hold: the planner reorients as it likes
+HOLD_LEVEL = 1  # keep the tool's tilt; spin about arm_mount z is free
+HOLD_FIXED = 2  # keep the orientation entirely
+POSITION = 0  # control_mode: stiff position control
+IMPEDANCE = 1  # control_mode: compliant joint impedance
 QUEUE = 0  # execute_joint_trajectory preemption: wait for the running goal to finish
 LATEST_WINS = 1  # execute_joint_trajectory preemption: replace the running goal
+# `gains` by name: the driver's impedance profiles ("default": the session's default)
+GAIN_PROFILES = {
+    "default": ImpedanceGains.PROFILE_SESSION_DEFAULT,
+    "soft": ImpedanceGains.PROFILE_SOFT,
+    "medium": ImpedanceGains.PROFILE_MEDIUM,
+    "stiff": ImpedanceGains.PROFILE_STIFF,
+}
+GAIN_KEYS = ("kq", "zeta", "torque_limit")  # `gains` as a dict: custom joint impedance
 
 # QoS as in SheppyArm (sheppy_arm.py@7bc328ae:190-201) and the driver's docs/interface.md.
 LATCHED = QoSProfile(
@@ -204,6 +212,53 @@ class TrajectoryResult:
     error_code: int  # 0 SUCCESSFUL, or one of sheppy_arm.ERRORS
     error_string: str
     final_error: np.ndarray  # joint position error (reference - actual) at the end, rad
+
+
+@dataclass
+class GoalFeedback:
+    """A running goal's feedback."""
+
+    fraction_complete: float  # execution progress, 0 .. 1 (0 while planning)
+    actual: np.ndarray  # measured joint positions, rad
+    phase: str = ""  # go_to goals: "planning" or "executing"
+    planner_state: str = ""  # go_to goals: cuRobo's state while planning
+
+
+def _goal_feedback(m):
+    return GoalFeedback(
+        float(m.fraction_complete),
+        np.array(m.actual.positions),
+        getattr(m, "phase", ""),
+        getattr(m, "planner_state", ""),
+    )
+
+
+def impedance_gains(gains) -> ImpedanceGains:
+    """`gains` as the driver's ImpedanceGains: None (the message default), a profile name in
+    GAIN_PROFILES, or a dict {"kq": 7 floats, "zeta": float, "torque_limit": 7 floats} (custom
+    joint impedance, SheppyArm's IMPEDANCE without path_tol). ArmError for anything else."""
+    if gains is None:
+        return ImpedanceGains()
+    if isinstance(gains, str) and gains in GAIN_PROFILES:
+        return ImpedanceGains(profile=GAIN_PROFILES[gains])
+    if isinstance(gains, dict) and set(gains) == set(GAIN_KEYS):
+        try:
+            kq = np.asarray(gains["kq"], float)
+            zeta = float(gains["zeta"])
+            torque_limit = np.asarray(gains["torque_limit"], float)
+        except (TypeError, ValueError):
+            kq = None
+        if kq is not None and kq.shape == torque_limit.shape == (len(JOINTS),):
+            return ImpedanceGains(
+                profile=ImpedanceGains.PROFILE_CUSTOM,
+                custom=JointImpedanceGainValues(
+                    kq=kq.tolist(), zeta=zeta, torque_limit=torque_limit.tolist()
+                ),
+            )
+    raise ArmError(
+        f"gains must be one of {', '.join(GAIN_PROFILES)} or a dict "
+        f'{{"kq": 7 floats, "zeta": float, "torque_limit": 7 floats}}, not {gains!r}'
+    )
 
 
 def _duration(t):
@@ -362,7 +417,9 @@ class ArmInterface:
 
     def end_action(self):
         """End the action: settle any goal or stream, destroy every ROS entity _open() made and
-        forget the state they received, so the next action starts from the driver afresh."""
+        forget the state they received, so the next action starts from the driver afresh.
+        Worst case, it waits GOAL_ACCEPT_S + CANCEL_SETTLE_S: for a goal the driver has not yet
+        answered, to accept it and then to settle its cancel."""
         with self._cond:
             self._in_action = False
             self._cond.notify_all()  # a call waiting for state wakes with NotInAction
@@ -694,11 +751,13 @@ class ArmInterface:
         orientation_hold=HOLD_NONE,
         control_mode=POSITION,
         gains=None,
+        feedback=None,
     ):
         """Tool (tool_frame = ee_pos) to (pos, quat xyzw) in FRAME: cuRobo plans from the measured
         joints and the driver executes. Blocking; True if the driver succeeded and the tool ended
         within GO_TO_TRACK_M. `orientation_hold` (HOLD_*), `control_mode` (POSITION or IMPEDANCE)
-        and `gains` (ImpedanceGains) are the driver's goal fields."""
+        and `gains` (see impedance_gains()) are the driver's goal fields. `feedback`: called with
+        each GoalFeedback, on the executor (it must not block)."""
         g = GoToEEPose.Goal()
         g.target = PoseStamped()
         g.target.header.frame_id = sheppy_arm.FRAME
@@ -708,7 +767,7 @@ class ArmInterface:
         o = g.target.pose.orientation
         o.x, o.y, o.z, o.w = map(float, quat)
         g.orientation_hold = orientation_hold
-        if not self._go_to("go_to_ee_pose", g, label, speed_scale, control_mode, gains):
+        if not self._go_to("go_to_ee_pose", g, label, speed_scale, control_mode, gains, feedback):
             return False
         tool = _tool_position(self._read("/ee_state"))
         e = float(np.linalg.norm(tool - np.asarray(pos[:3], float)))
@@ -719,14 +778,23 @@ class ArmInterface:
         return True
 
     def go_to_joint_config(
-        self, q, label="go_to_joint_config", speed_scale=None, *, control_mode=POSITION, gains=None
+        self,
+        q,
+        label="go_to_joint_config",
+        speed_scale=None,
+        *,
+        control_mode=POSITION,
+        gains=None,
+        feedback=None,
     ):
         """Joints to `q` (rad, J1..J7): cuRobo plans in joint space and the driver executes.
         Blocking; True if the driver succeeded and every joint ended within GO_TO_TRACK_DEG (free
-        joints compared the short way)."""
+        joints compared the short way). Keyword arguments as in go_to_ee_pose."""
         g = GoToJointConfig.Goal()
         g.target_joints = [float(x) for x in q]
-        if not self._go_to("go_to_joint_config", g, label, speed_scale, control_mode, gains):
+        if not self._go_to(
+            "go_to_joint_config", g, label, speed_scale, control_mode, gains, feedback
+        ):
             return False
         d = np.asarray(q, float) - self.raw_joints()
         d[CONTINUOUS] = (d[CONTINUOUS] + np.pi) % (2 * np.pi) - np.pi
@@ -737,16 +805,19 @@ class ArmInterface:
         self._node.get_logger().info(message)
         return True
 
-    def go_to_preset(self, name: str, speed_scale=None, *, control_mode=POSITION, gains=None):
+    def go_to_preset(
+        self, name: str, speed_scale=None, *, control_mode=POSITION, gains=None, feedback=None
+    ):
         """The driver's named preset pose (its registry), planned by cuRobo and executed by the
-        driver, like go_to_joint_config. Blocking; True if the driver succeeded."""
+        driver, like go_to_joint_config. Blocking; True if the driver succeeded. Keyword
+        arguments as in go_to_ee_pose."""
         g = GoToPreset.Goal()
         g.preset_name = name
-        return self._go_to(
-            "go_to_preset", g, f"go_to_preset {name}", speed_scale, control_mode, gains
-        )
+        label = f"go_to_preset {name}"
+        return self._go_to("go_to_preset", g, label, speed_scale, control_mode, gains, feedback)
 
-    def _go_to(self, name, g, label, speed_scale, control_mode, gains):
+    def _go_to(self, name, g, label, speed_scale, control_mode, gains, feedback):
+        g.gains = impedance_gains(gains)  # a bad `gains` raises before anything is sent
         self._checkpoint()
         ctx = self._ctx
         self._check_command()
@@ -761,8 +832,6 @@ class ArmInterface:
             )
         g.speed_scale = float(sheppy_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
         g.control_mode = control_mode
-        if gains is not None:
-            g.gains = gains
         self._node.get_logger().info(
             f"  {label}: cuRobo plans the path (not previewed), run at {g.speed_scale:g} x its "
             "speed ..."
@@ -776,6 +845,7 @@ class ArmInterface:
             ctx,
             f"  SheppyArm: {label}: goal REJECTED -- nothing moved",
             f"  SheppyArm: {label}: no result in {timeout_s:.0f} s -- goal cancelled",
+            feedback=feedback,
         )
         if res is None:
             return False
@@ -811,14 +881,7 @@ class ArmInterface:
         g.control_mode = 0  # POSITION
         if impedance:
             g.control_mode = 1  # IMPEDANCE
-            g.gains = ImpedanceGains(
-                profile=ImpedanceGains.PROFILE_CUSTOM,
-                custom=JointImpedanceGainValues(
-                    kq=list(impedance["kq"]),
-                    zeta=float(impedance["zeta"]),
-                    torque_limit=list(impedance["torque_limit"]),
-                ),
-            )
+            g.gains = impedance_gains({k: impedance[k] for k in GAIN_KEYS})
         g.preemption = 0  # QUEUE
         client = self._action("execute_joint_trajectory")
         if not self._wait_for_server(client, ctx, STATE_WAIT_S):
@@ -871,12 +934,15 @@ class ArmInterface:
         None, with last_error set, when the goal was refused (`rejected`), had no result in time
         (`timed_out`; the goal is cancelled) or its action ended. `monitor`: polled while the goal
         runs; True cancels the goal and sets monitor_stopped. `feedback`: called with each
-        Feedback, on the executor (it must not block). `trajectory`: record last_path."""
+        GoalFeedback, on the executor (it must not block). `trajectory`: record last_path."""
         g.sender_id = sheppy_arm.SENDER_ID
         token = self._driver.token
         if token is not None:
             g.token = list(token)
-        on_feedback = None if feedback is None else (lambda m: feedback(m.feedback))
+
+        def on_feedback(m):
+            feedback(_goal_feedback(m.feedback))
+
         self._driver.begin_goal(name)
         try:
             # The client is used under _cond, after _in_action is checked: end_action() clears
@@ -884,7 +950,9 @@ class ArmInterface:
             with self._cond:
                 send = None
                 if self._in_action:
-                    send = self._goal = client.send_goal_async(g, feedback_callback=on_feedback)
+                    send = self._goal = client.send_goal_async(
+                        g, feedback_callback=None if feedback is None else on_feedback
+                    )
             if send is None:
                 self._refuse(ACTION_ENDED_MESSAGE)
                 return None
@@ -923,16 +991,17 @@ class ArmInterface:
             t_end = time.monotonic() + timeout_s
             while not rf.done() and time.monotonic() < t_end and self._in_action:
                 if ctx.cancelled():
-                    self._cancel_goal(gh, rf)
+                    self._cancel(gh)
+                    self._wait(rf, CANCEL_SETTLE_S)  # let the driver settle it
                     ctx.checkpoint()  # raises the engine's Cancelled
                 if monitor is not None and not self.monitor_stopped and monitor():
                     self.monitor_stopped = True
-                    gh.cancel_goal_async()  # the driver stops the arm, then settles PREEMPTED
+                    self._cancel(gh)  # the driver stops the arm, then settles PREEMPTED
                 time.sleep(POLL_S)
             if rf.done():
                 res = rf.result()
         except KeyboardInterrupt:
-            gh.cancel_goal_async()
+            self._cancel(gh)
             self._node.get_logger().warning("  SheppyArm: Ctrl-C -- goal cancelled")
             raise
         finally:
@@ -941,7 +1010,7 @@ class ArmInterface:
             self._refuse(ACTION_ENDED_MESSAGE)
             return None
         if res is None:
-            gh.cancel_goal_async()
+            self._cancel(gh)
             self._refuse(timed_out)
             return None
         # HALTED under our token: control taken, unless the driver e-stopped (an e-stop drops
@@ -952,8 +1021,16 @@ class ArmInterface:
             self._check_command()  # raises ControlTaken: another sender took the arm from us
         return res.result
 
+    def _cancel(self, gh):
+        """Cancel goal `gh`, unless its action has ended: end_action() then cancels it (_settle)
+        before it destroys the client, which must not be used after that."""
+        with self._cond:  # end_action() clears _in_action under _cond before it destroys
+            if self._in_action:
+                gh.cancel_goal_async()
+
     def _cancel_goal(self, gh, rf):
-        """Cancel a goal and wait up to CANCEL_SETTLE_S for the driver to settle it."""
+        """Cancel a goal and wait up to CANCEL_SETTLE_S for the driver to settle it (_settle,
+        before the client is destroyed)."""
         gh.cancel_goal_async()
         deadline = time.monotonic() + CANCEL_SETTLE_S
         while not rf.done() and time.monotonic() < deadline:
@@ -1025,10 +1102,15 @@ class ArmInterface:
         """The driver's /execute_joint_trajectory, every field: joints `names` through `points`,
         [(t from start s, positions, velocities), ...] sent as given (no timing or interpolation
         added). Tolerances: position (rad), one for all joints or one per joint; None leaves the
-        driver's default. `gains`: ImpedanceGains. `feedback`: called with each
-        ExecuteJointTrajectory.Feedback on the executor (it must not block). Blocking; a cancel of
-        the action cancels the goal and raises Cancelled. Raises ArmError when the arm must not
-        be commanded, the goal is refused or no result comes in time."""
+        driver's default. `gains`: see impedance_gains(). `feedback`: called with each
+        GoalFeedback on the executor (it must not block). Blocking; a cancel of the action
+        cancels the goal and raises Cancelled, its end raises NotInAction. Raises ArmError when
+        the arm must not be commanded, the goal is refused or no result comes in time."""
+        if speed_scale <= 0:
+            self._fail(
+                ArmError, f"execute_joint_trajectory: speed_scale must be > 0, not {speed_scale}"
+            )
+        gains = impedance_gains(gains)
         self._checkpoint()
         ctx = self._ctx
         self._check_command()
@@ -1050,9 +1132,7 @@ class ArmInterface:
         g.path_tolerance = _tolerances(names, path_tolerance)
         g.goal_tolerance = _tolerances(names, goal_tolerance)
         g.goal_time_tolerance = _duration(goal_time_tolerance)
-        g.control_mode, g.preemption = control_mode, preemption
-        if gains is not None:
-            g.gains = gains
+        g.control_mode, g.preemption, g.gains = control_mode, preemption, gains
         g.speed_scale = float(speed_scale)
         client = self._action("execute_joint_trajectory")
         if not self._wait_for_server(client, ctx, STATE_WAIT_S):
@@ -1069,7 +1149,7 @@ class ArmInterface:
             feedback=feedback,
         )
         if res is None:
-            raise ArmError(self.last_error)
+            raise (ArmError if self._in_action else NotInAction)(self.last_error)
         return TrajectoryResult(
             res.error_code, res.error_string, np.array(res.final_error.positions)
         )

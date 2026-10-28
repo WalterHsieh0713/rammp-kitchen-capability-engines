@@ -4,16 +4,20 @@ import time
 import numpy as np
 import pytest
 from fake_driver import FakeCtx
+from rammp_arm_interfaces.action import GoToEEPose
 from rammp_arm_interfaces.msg import ImpedanceGains
+from rclpy.action.client import ClientGoalHandle
 from sheppy_arm import SENDER_ID, TOOL_Z
 
-from capability_engine.arm import HOLD_LEVEL, IMPEDANCE, LATEST_WINS
-from capability_engine.driver_state import NotInAction
+from capability_engine import arm as arm_module
+from capability_engine.arm import HOLD_LEVEL, IMPEDANCE, LATEST_WINS, GoalFeedback
+from capability_engine.driver_state import ArmError, NotInAction
 from capability_engine.engine import Cancelled
 
 HOLD_S = 5.0  # how long the fake runs a goal in the tests that need one running
 TOKEN = b"\x02" * 16
 UP = [0.0, 0.0, 0.0, 1.0]  # identity quaternion, x y z w
+CUSTOM = {"kq": [10.0] * 7, "zeta": 0.7, "torque_limit": [20.0] * 7}
 
 
 def pt_time(p):
@@ -65,14 +69,66 @@ def test_go_to_driver_kwargs(arm_env):
     pos = [0.4, 0.1, 0.3]
     fake.finish_at("go_to_ee_pose", flange=flange_for_tool(pos))
     arm.begin_action(FakeCtx(), None)
-    soft = ImpedanceGains(profile=ImpedanceGains.PROFILE_SOFT)
     assert arm.go_to_ee_pose(
-        pos, UP, orientation_hold=HOLD_LEVEL, control_mode=IMPEDANCE, gains=soft
+        pos, UP, orientation_hold=HOLD_LEVEL, control_mode=IMPEDANCE, gains="soft"
     )
     g = fake.goals["go_to_ee_pose"][-1]
-    assert g.orientation_hold == HOLD_LEVEL
-    assert g.control_mode == IMPEDANCE
+    assert g.orientation_hold == GoToEEPose.Goal.HOLD_LEVEL
+    assert g.control_mode == GoToEEPose.Goal.CONTROL_MODE_IMPEDANCE
     assert g.gains.profile == ImpedanceGains.PROFILE_SOFT
+
+
+def test_go_to_gains_dict(arm_env):
+    arm, _, fake = arm_env
+    fake.finish_at("go_to_joint_config", joints=[0.2] * 7)
+    arm.begin_action(FakeCtx(), None)
+    assert arm.go_to_joint_config([0.2] * 7, control_mode=IMPEDANCE, gains=CUSTOM)
+    gains = fake.goals["go_to_joint_config"][-1].gains
+    assert gains.profile == ImpedanceGains.PROFILE_CUSTOM
+    np.testing.assert_allclose(gains.custom.kq, CUSTOM["kq"])
+    assert gains.custom.zeta == pytest.approx(CUSTOM["zeta"])
+    np.testing.assert_allclose(gains.custom.torque_limit, CUSTOM["torque_limit"])
+
+
+@pytest.mark.parametrize(
+    "gains",
+    ["squishy", {**CUSTOM, "kq": [10.0] * 6}, {"kq": [10.0] * 7, "zeta": 0.7}, 0.5],
+    ids=["unknown_profile", "short_kq", "missing_key", "not_a_name_or_dict"],
+)
+def test_bad_gains_refused(arm_env, gains):
+    arm, _, fake = arm_env
+    arm.begin_action(FakeCtx(), None)
+    with pytest.raises(ArmError, match="gains"):
+        arm.go_to_ee_pose([0.4, 0.1, 0.3], UP, gains=gains)
+    assert not fake.goals["go_to_ee_pose"]
+
+
+def test_goal_constants_match_the_driver():
+    goal = GoToEEPose.Goal
+    assert (arm_module.HOLD_NONE, arm_module.HOLD_LEVEL, arm_module.HOLD_FIXED) == (
+        goal.HOLD_NONE,
+        goal.HOLD_LEVEL,
+        goal.HOLD_FIXED,
+    )
+    assert (arm_module.POSITION, arm_module.IMPEDANCE) == (
+        goal.CONTROL_MODE_POSITION,
+        goal.CONTROL_MODE_IMPEDANCE,
+    )
+    assert (arm_module.QUEUE, arm_module.LATEST_WINS) == (0, 1)  # the driver's comment values
+
+
+def test_go_to_feedback_is_plain(arm_env):
+    arm, _, fake = arm_env
+    fake.set_joints([0.1] * 7)
+    fake.hold_goals(0.3)  # the goal runs long enough for its feedback to arrive
+    arm.begin_action(FakeCtx(), None)
+    feedback = []
+    assert arm.go_to_preset("home", feedback=feedback.append)
+    fb = feedback[0]
+    assert isinstance(fb, GoalFeedback)
+    assert (fb.phase, fb.planner_state) == ("executing", "fake")
+    assert fb.fraction_complete == pytest.approx(0.5)
+    np.testing.assert_allclose(fb.actual, [0.1] * 7)
 
 
 def test_go_to_preset_home(arm_env):
@@ -124,12 +180,12 @@ def test_cancel_during_go_to(arm_env):
 
 def test_execute_joint_trajectory_raw(arm_env):
     arm, _, fake = arm_env
-    fake.set_result("execute_joint_trajectory", -4)
+    fake.set_result("execute_joint_trajectory", -4, final_error=[0.01, -0.02])
+    fake.set_joints([0.1] * 7)
     fake.hold_goals(0.3)  # the goal runs long enough for its feedback to arrive
     arm.begin_action(FakeCtx(), TOKEN)
     names = ["arm_joint_1", "arm_joint_2"]
     points = [(0.5, [0.1, 0.2], [0.0, 0.0]), (1.25, [0.3, 0.4], [0.1, 0.0])]
-    soft = ImpedanceGains(profile=ImpedanceGains.PROFILE_SOFT)
     feedback = []
     res = arm.execute_joint_trajectory(
         names,
@@ -139,13 +195,17 @@ def test_execute_joint_trajectory_raw(arm_env):
         goal_time_tolerance=0.5,
         control_mode=IMPEDANCE,
         preemption=LATEST_WINS,
-        gains=soft,
+        gains="soft",
         speed_scale=0.5,
         feedback=feedback.append,
     )
     assert res.error_code == -4
     assert res.error_string == "PATH_TOLERANCE_VIOLATED"
-    assert feedback
+    np.testing.assert_allclose(res.final_error, [0.01, -0.02])
+    fb = feedback[0]
+    assert isinstance(fb, GoalFeedback)
+    assert fb.fraction_complete == pytest.approx(0.5)
+    np.testing.assert_allclose(fb.actual, [0.1] * 7)
     g = fake.goals["execute_joint_trajectory"][-1]
     assert list(g.trajectory.joint_names) == names
     assert [pt_time(p) for p in g.trajectory.points] == pytest.approx([0.5, 1.25])
@@ -154,9 +214,18 @@ def test_execute_joint_trajectory_raw(arm_env):
     assert [(t.name, t.position) for t in g.path_tolerance] == [(n, 0.2) for n in names]
     assert [t.position for t in g.goal_tolerance] == pytest.approx([0.01, 0.02])
     assert (g.goal_time_tolerance.sec, g.goal_time_tolerance.nanosec) == (0, 500_000_000)
-    assert (g.control_mode, g.preemption, g.gains.profile) == (IMPEDANCE, LATEST_WINS, 1)
+    assert (g.control_mode, g.preemption) == (IMPEDANCE, LATEST_WINS)
+    assert g.gains.profile == ImpedanceGains.PROFILE_SOFT
     assert g.speed_scale == pytest.approx(0.5)
     assert (g.sender_id, bytes(g.token)) == (SENDER_ID, TOKEN)
+
+
+def test_execute_joint_trajectory_refuses_a_non_positive_speed(arm_env):
+    arm, _, fake = arm_env
+    arm.begin_action(FakeCtx(), None)
+    with pytest.raises(ArmError, match="speed_scale"):
+        arm.execute_joint_trajectory(["arm_joint_1"], [(1.0, [0.1], [0.0])], speed_scale=0.0)
+    assert not fake.goals["execute_joint_trajectory"]
 
 
 # -- races at the end of an action ------------------------------------------------------------
@@ -191,3 +260,49 @@ def test_end_action_while_the_goal_is_accepted_cancels_it(arm_env):
     assert result == [False]
     assert arm.last_error == "action ended"
     assert arm._goal is None
+
+
+def test_execute_joint_trajectory_ended_action_is_not_in_action(arm_env):
+    arm, _, fake = arm_env
+    fake.hold_goals(HOLD_S)
+    arm.begin_action(FakeCtx(), None)
+    errors = []
+
+    def run():
+        try:
+            arm.execute_joint_trajectory(["arm_joint_1"], [(1.0, [0.1], [0.0])])
+        except Exception as e:  # noqa: BLE001 -- the test inspects what was raised
+            errors.append(e)
+
+    motion = threading.Thread(target=run, daemon=True)
+    motion.start()
+    deadline = time.monotonic() + HOLD_S
+    while not fake.goals["execute_joint_trajectory"] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.1)  # the goal is accepted and running
+    arm.end_action()
+    motion.join(HOLD_S)
+    assert len(errors) == 1 and isinstance(errors[0], NotInAction)
+
+
+def test_monitor_cancel_after_end_action_leaves_the_destroyed_client_alone(arm_env, monkeypatch):
+    arm, _, fake = arm_env
+    fake.hold_goals(HOLD_S)
+    arm.begin_action(FakeCtx(), None)
+    client_open = []  # at each cancel call: were the arm's clients still there?
+    cancel = ClientGoalHandle.cancel_goal_async
+
+    def recording_cancel(gh):
+        client_open.append(arm._opened)
+        return cancel(gh)
+
+    monkeypatch.setattr(ClientGoalHandle, "cancel_goal_async", recording_cancel)
+
+    def monitor():  # the action ends (its client destroyed) just before the monitor fires
+        arm.end_action()
+        return True
+
+    assert arm.move_joints([[0.3] * 7], monitor=monitor) is False
+    assert arm.last_error == "action ended"
+    assert fake.cancelled("execute_joint_trajectory")  # by end_action()'s settle
+    assert client_open == [True]  # the monitor's cancel did not touch the destroyed client
