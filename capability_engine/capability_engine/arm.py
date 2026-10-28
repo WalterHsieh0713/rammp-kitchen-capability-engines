@@ -10,6 +10,7 @@ action is returned in the next.
 import copy
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 
 import numpy as np
@@ -25,7 +26,14 @@ from rammp_arm_interfaces.action import (
     GoToPreset,
 )
 from rammp_arm_interfaces.msg import EeState as EeStateMsg
-from rammp_arm_interfaces.msg import GripperSetpoint, ImpedanceGains, JointImpedanceGainValues
+from rammp_arm_interfaces.msg import (
+    GripperSetpoint,
+    ImpedanceGains,
+    JointImpedanceGainValues,
+    JointSetpoint,
+    PoseSetpoint,
+    TwistSetpoint,
+)
 from rammp_arm_interfaces.msg import GripperState as GripperStateMsg
 from rammp_arm_interfaces.msg import StreamStatus as StreamStatusMsg
 from rammp_arm_interfaces.srv import CloseStream, ListControllers, OpenStream, SetGains
@@ -60,6 +68,7 @@ from capability_engine.driver_state import (
     ArmError,
     DriverState,
     EStopped,
+    ModeConflict,
     NotInAction,
     StateTimeout,
 )
@@ -82,6 +91,16 @@ GRIPPER_PERIOD_S = 0.02  # gripper() streams /setpoint/gripper at 50 Hz
 GRIPPER_MOVED = 0.002  # gripper(): a position change (0..1) above this means the fingers move
 GRIPPER_JUDGE_AFTER_S = 0.5  # gripper(): the fingers are judged still only after this long
 GRIPPER_STILL_S = 0.3  # gripper(): still this long -> settled, the stream stops
+PLAN_TIMEOUT_S = 30.0  # how long a plan_to_* call waits for cuRobo's plan
+SERVICE_WAIT_S = 5.0  # how long a service call waits for its server to come up
+SERVICE_CALL_S = 10.0  # how long a service call waits for its answer (set_world reloads cuRobo)
+STREAM_TIMEOUT_S = 0.1  # stream(): the driver closes the session after this long with no setpoint
+PUBLISHER_MATCH_S = 1.0  # how long a new setpoint or /estop publisher waits for the driver to
+# subscribe before its first message (DDS discovery), so that message is not lost
+STREAM_SETTLE_S = 0.5  # how long opening or closing a stream waits for /stream_status to show it
+CLOSE_STREAM_WAIT_S = 1.0  # how long closing a stream waits for /close_stream's answer
+CONTROL_FROM_ORCHESTRATOR_MESSAGE = "control comes from the orchestrator"
+STREAM_ENDED_MESSAGE = "the stream is closed: send() works only inside its with block"
 
 # The driver's goal fields, for the keyword arguments of the goal methods (the driver's values).
 HOLD_NONE = 0  # go_to_ee_pose orientation_hold: the planner reorients as it likes
@@ -108,6 +127,14 @@ SETPOINT_QOS = QoSProfile(
     reliability=ReliabilityPolicy.BEST_EFFORT, history=HistoryPolicy.KEEP_LAST, depth=1
 )
 ESTOP_QOS = 10  # /estop is volatile; a reliable publisher reaches any subscriber
+# What stream() sends on each /setpoint/<channel> a controller reads, and what send() takes.
+SETPOINTS = {
+    "joint_position": (JointSetpoint, "7 joint positions (rad)"),
+    "joint_velocity": (JointSetpoint, "7 joint velocities (rad/s)"),
+    "joint_torque": (JointSetpoint, "7 joint torques (N m)"),
+    "pose": (PoseSetpoint, "(position xyz, quaternion xyzw) of /ee_state's frame in arm_mount"),
+    "twist": (TwistSetpoint, "6 floats: linear (m/s) then angular (rad/s), in arm_mount axes"),
+}
 
 ACTIONS = {
     "execute_joint_trajectory": (ExecuteJointTrajectory, "/execute_joint_trajectory"),
@@ -224,6 +251,28 @@ class GoalFeedback:
     planner_state: str = ""  # go_to goals: cuRobo's state while planning
 
 
+@dataclass
+class Plan:
+    """A cuRobo plan (nothing moved): sample times (s), joints and joint velocities, (N, 7) in
+    JOINTS order. A failed plan has success False, the planner's message and no samples."""
+
+    success: bool
+    message: str
+    t: np.ndarray = field(default_factory=lambda: np.zeros(0))
+    q: np.ndarray = field(default_factory=lambda: np.zeros((0, len(JOINTS))))
+    qd: np.ndarray = field(default_factory=lambda: np.zeros((0, len(JOINTS))))
+    planning_time: float = 0.0  # s
+
+
+@dataclass
+class Controller:
+    """A streaming controller of the driver (/list_controllers)."""
+
+    name: str
+    channels: list[str]  # the /setpoint/<channel> topics it reads
+    available: bool  # whether the running driver can open it
+
+
 def _goal_feedback(m):
     return GoalFeedback(
         float(m.fraction_complete),
@@ -264,6 +313,57 @@ def impedance_gains(gains) -> ImpedanceGains:
 def _duration(t):
     sec = int(t)
     return Duration(sec=sec, nanosec=int(round((t - sec) * 1e9)))
+
+
+def _seconds(d):
+    return d.sec + d.nanosec * 1e-9
+
+
+def _plan(res):
+    """A planner's result as a Plan, its joints reordered to JOINTS; None when its joint names
+    are not JOINTS'."""
+    names = list(res.trajectory.joint_names)
+    if sorted(names) != sorted(JOINTS):
+        return None
+    idx = [names.index(n) for n in JOINTS]
+    points = res.trajectory.points
+    return Plan(
+        True,
+        res.message,
+        np.array([_seconds(p.time_from_start) for p in points]),
+        np.array([[p.positions[i] for i in idx] for p in points]).reshape(-1, len(JOINTS)),
+        np.array([[p.velocities[i] for i in idx] for p in points]).reshape(-1, len(JOINTS)),
+        float(res.planning_time),
+    )
+
+
+def _setpoint(channel, value):
+    """`value` as the message on /setpoint/<channel> (see SETPOINTS), or None when it is not
+    of that channel's shape."""
+    msg_type = SETPOINTS[channel][0]
+    try:
+        if channel == "pose":
+            pos, quat = (np.asarray(v, float) for v in value)
+            if pos.shape != (3,) or quat.shape != (4,):
+                return None
+            m = msg_type()
+            p, o = m.pose.position, m.pose.orientation
+            p.x, p.y, p.z = pos.tolist()
+            o.x, o.y, o.z, o.w = quat.tolist()
+            return m
+        v = np.asarray(value, float)
+    except (TypeError, ValueError):
+        return None
+    if channel == "twist":
+        if v.shape != (6,):
+            return None
+        m = msg_type()
+        lin, ang = m.twist.linear, m.twist.angular
+        lin.x, lin.y, lin.z, ang.x, ang.y, ang.z = v.tolist()
+        return m
+    if v.shape != (len(JOINTS),):
+        return None
+    return msg_type(values=v.tolist())
 
 
 def _tolerances(names, position):
@@ -380,6 +480,34 @@ class _Gate(CallbackGroup):
             self._cond.wait_for(lambda: self._running == 0)
 
 
+class Stream:
+    """A streaming session open on the driver, from ArmInterface.stream(): send() a setpoint
+    at least every timeout_s, or the driver closes the session."""
+
+    def __init__(self, arm, controller, channel, ctx, driver):
+        self.controller = controller
+        self.channel = channel  # the /setpoint/<channel> it publishes on
+        self._arm = arm
+        self.ctx, self.driver, self.token = ctx, driver, driver.token
+        self.pub = None  # created before open_stream, destroyed when the session closes
+        self.opened = False  # the driver accepted open_stream
+
+    def send(self, setpoint):
+        """Send one setpoint: 7 joints for joint controllers, (pos, quat xyzw) of /ee_state's frame
+        (not get_state()'s tool frame) for pose controllers, 6 floats (linear, then angular, in
+        arm_mount axes) for twist controllers. Never blocks. Raises Cancelled once the action is
+        cancelled, StreamClosed, ControlTaken or EStopped when the driver will not take it, and
+        NotInAction outside the with block; leaving the block then zeroes and closes the session."""
+        self._arm._send_setpoint(self, setpoint)
+
+    def message(self, value):
+        """`value` as this session's setpoint message, with the token; None for a wrong shape."""
+        m = _setpoint(self.channel, value)
+        if m is not None and self.token is not None:
+            m.token = list(self.token)
+        return m
+
+
 class ArmInterface:
     """`self.arm`: SheppyArm's API and the driver's, side by side, on the engine's node."""
 
@@ -402,6 +530,7 @@ class ArmInterface:
         self.monitor_stopped = False  # the last trajectory was stopped by its monitor
         self._goal = None  # the send future of the running goal: end_action() cancels it
         self._path_t0 = None  # time.monotonic() its goal started; set: /ee_state adds to last_path
+        self._stream = None  # the open Stream: end_action() zeroes and closes it
 
     # -- lifecycle ----------------------------------------------------------------------------
 
@@ -418,8 +547,9 @@ class ArmInterface:
     def end_action(self):
         """End the action: settle any goal or stream, destroy every ROS entity _open() made and
         forget the state they received, so the next action starts from the driver afresh.
-        Worst case, it waits GOAL_ACCEPT_S + CANCEL_SETTLE_S: for a goal the driver has not yet
-        answered, to accept it and then to settle its cancel."""
+        Worst case, it waits GOAL_ACCEPT_S + CANCEL_SETTLE_S for a goal the driver has not yet
+        answered, to accept it and then to settle its cancel, or CLOSE_STREAM_WAIT_S +
+        STREAM_SETTLE_S for a stream to close."""
         with self._cond:
             self._in_action = False
             self._cond.notify_all()  # a call waiting for state wakes with NotInAction
@@ -445,6 +575,9 @@ class ArmInterface:
             gh = self._wait(send, GOAL_ACCEPT_S)
             if gh is not None and gh.accepted:
                 self._cancel_goal(gh, gh.get_result_async())
+        stream = self._stream
+        if stream is not None:
+            self._close_stream(stream)
 
     def _check_in_action(self):
         if not self._in_action:
@@ -1014,9 +1147,13 @@ class ArmInterface:
             self._refuse(timed_out)
             return None
         # HALTED under our token: control taken, unless the driver e-stopped (an e-stop drops
-        # grants without a new generation), which is the caller's plain failure
-        code = res.result.error_code
-        if code == HALTED and token is not None and not self._estopped_within(HALT_STATUS_WAIT_S):
+        # grants without a new generation), which is the caller's plain failure. The planner's
+        # goals carry no token (and no error_code).
+        if (
+            token is not None
+            and res.result.error_code == HALTED
+            and not self._estopped_within(HALT_STATUS_WAIT_S)
+        ):
             self._driver.on_goal_halted()
             self._check_command()  # raises ControlTaken: another sender took the arm from us
         return res.result
@@ -1153,3 +1290,335 @@ class ArmInterface:
         return TrajectoryResult(
             res.error_code, res.error_string, np.array(res.final_error.positions)
         )
+
+    # -- the planner (cuRobo: plans only, nothing moves) -----------------------------------------
+
+    def plan_to_pose(self, pos, quat, start_joints, hold=HOLD_NONE) -> Plan:
+        """cuRobo's plan for the tool frame to (pos, quat xyzw) in arm_mount, from `start_joints`
+        (rad, arm_joint_1..7, as the driver reports them: raw_joints()). `hold` (HOLD_*): how much
+        of the tool's orientation the path keeps. A failed plan is Plan(success=False, message)."""
+        g = PlanToPose.Goal()
+        p, o = g.target.position, g.target.orientation
+        p.x, p.y, p.z = map(float, pos[:3])
+        o.x, o.y, o.z, o.w = map(float, quat)
+        g.start_joints = [float(x) for x in start_joints]
+        g.hold = hold
+        return self._plan_goal("plan_to_pose", g)
+
+    def plan_to_joints(self, q_goal, start_joints) -> Plan:
+        """cuRobo's plan to joints `q_goal` from `start_joints` (rad, arm_joint_1..7), as
+        plan_to_pose."""
+        g = PlanToJoints.Goal()
+        g.target_joints = [float(x) for x in q_goal]
+        g.start_joints = [float(x) for x in start_joints]
+        return self._plan_goal("plan_to_joints", g)
+
+    def set_world(self, world: str) -> tuple[bool, str]:
+        """Swap cuRobo's collision world for the packaged world `world`: (success, message)."""
+        res = self._call("set_world", SetWorld.Request(world=world))
+        return res.success, res.message
+
+    def _plan_goal(self, name, g):
+        self._check_in_action()
+        ctx = self._ctx
+        client = self._action(name)
+        path = ACTIONS[name][1]
+        if not self._wait_for_server(client, ctx, PLANNER_WAIT_S):
+            self._refuse(f"{name}: no {path} action server (the cuRobo planner)")
+            return Plan(False, self.last_error)
+        with self._cond:  # as in _run_goal: end_action() settles self._goal before it destroys
+            send = None
+            if self._in_action:
+                send = self._goal = client.send_goal_async(g)
+        if send is None:
+            self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+        try:
+            res = self._goal_result(
+                send,
+                PLAN_TIMEOUT_S,
+                ctx,
+                None,
+                f"{name}: goal REJECTED",
+                f"{name}: no plan in {PLAN_TIMEOUT_S:g} s -- goal cancelled",
+                None,
+                False,
+            )
+        finally:
+            with self._cond:
+                if self._in_action and self._goal is send:
+                    self._goal = None
+        if res is None:
+            if not self._in_action:
+                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+            return Plan(False, self.last_error)
+        if not res.success:
+            self._refuse(f"{name}: {res.message}")
+            return Plan(False, res.message, planning_time=float(res.planning_time))
+        plan = _plan(res)
+        if plan is None:
+            names = list(res.trajectory.joint_names)
+            self._refuse(f"{name}: the plan's joints are {names}, not {JOINTS}")
+            return Plan(False, self.last_error)
+        return plan
+
+    # -- the driver's services -----------------------------------------------------------------
+
+    def list_controllers(self) -> list[Controller]:
+        """The driver's streaming controllers, and whether each can be opened now."""
+        res = self._call("list_controllers", ListControllers.Request())
+        return [Controller(c.name, list(c.channels), bool(c.available)) for c in res.controllers]
+
+    def set_gains(self, gains) -> tuple[bool, str]:
+        """The session's default impedance gains (see impedance_gains()): (accepted, message)."""
+        req = SetGains.Request(spec=impedance_gains(gains))
+        token = self._driver.token
+        if token is not None:
+            req.token = list(token)
+        res = self._call("set_gains", req)
+        return res.accepted, res.message
+
+    def acquire_control(self, owner_id, token=None) -> tuple[bool, bytes, int, str]:
+        """Standalone only (control comes from the orchestrator under the engine). Seize control
+        as `owner_id`, with the pre-generated key `token` or a fresh one: (accepted, token,
+        generation, message)."""
+        self._check_standalone()
+        req = AcquireControl.Request(owner_id=owner_id)
+        if token is not None:
+            req.token = list(token)
+        res = self._call("acquire_control", req)
+        return res.accepted, bytes(res.token), int(res.generation), res.message
+
+    def release_control(self, token=None) -> tuple[bool, str]:
+        """Standalone only. Release `token` (default: this action's): (released, message)."""
+        self._check_standalone()
+        token = self._driver.token if token is None else token
+        req = ReleaseControl.Request()
+        if token is not None:
+            req.token = list(token)
+        res = self._call("release_control", req)
+        return res.released, res.message
+
+    def revoke_control(self, reason) -> tuple[bool, str]:
+        """Standalone only. Take control from whoever holds it: (revoked, message)."""
+        self._check_standalone()
+        res = self._call("revoke_control", RevokeControl.Request(reason=reason))
+        return res.revoked, res.message
+
+    def _check_standalone(self):
+        if not self._standalone:
+            self._fail(ArmError, CONTROL_FROM_ORCHESTRATOR_MESSAGE)
+
+    def _call(self, name, request):
+        """Call service `name` and return its response: ArmError when the server is not up within
+        SERVICE_WAIT_S or does not answer within SERVICE_CALL_S, NotInAction once the action
+        ends."""
+        self._ensure_open()
+        with self._open_lock:  # not while _destroy() empties the dict
+            client = self._clients.get(name)
+        if client is None:
+            self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+        path = SERVICES[name][1]
+        deadline = time.monotonic() + SERVICE_WAIT_S
+        future = None
+        while future is None:
+            # Under _cond: end_action() clears _in_action under it before it destroys the client.
+            with self._cond:
+                if not self._in_action:
+                    self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+                if client.service_is_ready():
+                    future = client.call_async(request)
+            if future is None:
+                if time.monotonic() > deadline:
+                    self._fail(
+                        ArmError, f"no {path} service in {SERVICE_WAIT_S:g} s -- is the driver up?"
+                    )
+                time.sleep(POLL_S)
+        deadline = time.monotonic() + SERVICE_CALL_S
+        while not future.done():
+            if not self._in_action:
+                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+            if time.monotonic() > deadline:
+                self._fail(ArmError, f"{path}: no answer in {SERVICE_CALL_S:g} s")
+            time.sleep(POLL_S)
+        return future.result()
+
+    # -- streaming -------------------------------------------------------------------------------
+
+    @contextmanager
+    def stream(self, controller: str, gains=None, timeout_s=STREAM_TIMEOUT_S):
+        """A streaming session on `controller` (see list_controllers()): yields a Stream to send()
+        setpoints on, at least every `timeout_s`. `gains` (see impedance_gains()) apply to
+        impedance controllers, at open. One session is one motion: a pause is honoured at open
+        only. Leaving the block, however (an exception, a cancel, the driver closing it), sends
+        the hold setpoint (zeros for twist and velocity controllers, the measured pose or joints
+        for pose and position ones; nothing for torque), closes the session and destroys its
+        publisher. ModeConflict while a goal or another stream runs; ArmError when the arm must
+        not be commanded or the driver has no such controller available."""
+        gains = impedance_gains(gains)
+        self._checkpoint()
+        ctx, driver = self._ctx, self._driver
+        self._check_command()
+        why = self.not_ready()
+        if why is not None:
+            self._fail(ArmError, f"stream {controller!r}: {why} -- nothing sent.")
+        # The latched /stream_status in before the session begins: its "closed" must not end it.
+        self._wait_for("/stream_status")
+        try:
+            driver.begin_stream(controller)
+        except ModeConflict as e:
+            self._fail(ModeConflict, str(e))
+        stream = None
+        try:
+            stream = self._new_stream(controller, ctx, driver)
+            req = OpenStream.Request(controller=controller, timeout_s=float(timeout_s), gains=gains)
+            if stream.token is not None:
+                req.token = list(stream.token)
+            res = self._call("open_stream", req)
+            if not res.accepted:
+                self._fail(
+                    ArmError,
+                    f"stream {controller!r}: refused ({res.error_code}) {res.message}",
+                )
+            stream.opened = True
+            if list(res.channels) != [stream.channel]:
+                self._fail(
+                    ArmError,
+                    f"stream {controller!r}: opened on {list(res.channels)}, not "
+                    f"[{stream.channel!r}] as /list_controllers said",
+                )
+            self._stream_shown(True, STREAM_SETTLE_S)
+            yield stream
+        finally:
+            if stream is not None:
+                self._close_stream(stream)
+            driver.end_stream()
+
+    def _new_stream(self, controller, ctx, driver):
+        """A Stream on `controller`'s channel, its publisher made and matched (the driver's
+        OpenStream: create the publisher and let discovery settle BEFORE opening, or the first
+        setpoints go nowhere and the session expires). ArmError for a controller the driver
+        does not list as available."""
+        listed = {c.name: c for c in self.list_controllers()}
+        row = listed.get(controller)
+        if row is None:
+            self._fail(
+                ArmError, f"stream: no controller {controller!r} (the driver has {sorted(listed)})"
+            )
+        if not row.available:
+            self._fail(ArmError, f"stream: controller {controller!r} is not available")
+        if len(row.channels) != 1 or row.channels[0] not in SETPOINTS:
+            self._fail(
+                ArmError,
+                f"stream: controller {controller!r} reads {row.channels}, not one of "
+                f"{sorted(SETPOINTS)}",
+            )
+        stream = Stream(self, controller, row.channels[0], ctx, driver)
+        with self._open_lock:  # registered: end_action() closes it from here on
+            if not self._in_action:
+                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+            msg_type = SETPOINTS[stream.channel][0]
+            topic = f"/setpoint/{stream.channel}"
+            stream.pub = self._node.create_publisher(msg_type, topic, SETPOINT_QOS)
+            self._stream = stream
+        _wait_matched(stream.pub)
+        return stream
+
+    def _send_setpoint(self, stream, setpoint):
+        if self._stream is not stream:  # closed already: the block outlived it, or its action
+            self._fail(NotInAction, STREAM_ENDED_MESSAGE)
+        if stream.ctx.cancelled():
+            stream.ctx.checkpoint()  # raises the engine's Cancelled; the block's exit closes
+        try:
+            stream.driver.check_command()
+        except ArmError as e:
+            self._fail(type(e), str(e))
+        m = stream.message(setpoint)
+        if m is None:
+            self._fail(
+                ArmError,
+                f"stream {stream.controller!r}: a {stream.channel} setpoint is "
+                f"{SETPOINTS[stream.channel][1]}, not {setpoint!r}",
+            )
+        with self._open_lock:  # not while the session closes and destroys `pub`
+            if self._stream is not stream:
+                self._fail(NotInAction, STREAM_ENDED_MESSAGE)
+            stream.pub.publish(m)
+
+    def _close_stream(self, stream):
+        """Send the hold setpoint, close the session at the driver and destroy its publisher,
+        once: on leaving the stream's block, or in end_action() (_settle), whichever comes first.
+        Stored handles only; waits at most CLOSE_STREAM_WAIT_S + STREAM_SETTLE_S."""
+        with self._open_lock:  # not while _destroy() destroys the close_stream client
+            if self._stream is not stream:
+                return
+            self._stream = None
+            try:
+                if stream.opened:
+                    hold = self._hold_setpoint(stream.channel)
+                    if hold is not None:
+                        stream.pub.publish(stream.message(hold))
+                    req = CloseStream.Request()
+                    if stream.token is not None:
+                        req.token = list(stream.token)
+                    res = self._wait(
+                        self._clients["close_stream"].call_async(req), CLOSE_STREAM_WAIT_S
+                    )
+                    if res is None or not res.closed:
+                        why = "no answer" if res is None else res.message
+                        self._node.get_logger().warning(
+                            f"stream {stream.controller!r}: /close_stream: {why}"
+                        )
+                    # Its "closed" in before the next session begins.
+                    self._stream_shown(False, STREAM_SETTLE_S)
+            finally:
+                self._node.destroy_publisher(stream.pub)
+
+    def _hold_setpoint(self, channel):
+        """What holds the arm as a session closes: zeros for twist and velocity, the latest
+        measured pose or joints for pose and position; None for torque (nothing is sent)."""
+        if channel == "twist":
+            return np.zeros(6)
+        if channel == "joint_velocity":
+            return np.zeros(len(JOINTS))
+        with self._cond:
+            if channel == "pose" and "/ee_state" in self._latest:
+                ee = self._latest["/ee_state"][0]
+                return ee.position, ee.orientation
+            if channel == "joint_position" and "/joint_states" in self._latest:
+                return self._latest["/joint_states"][0].position
+        return None
+
+    def _stream_shown(self, is_open, timeout_s):
+        """Whether /stream_status shows a session open (or closed), waiting up to `timeout_s`."""
+
+        def shown():
+            latest = self._latest.get("/stream_status")
+            return latest is not None and latest[0].open == is_open
+
+        with self._cond:
+            return self._cond.wait_for(shown, timeout_s)
+
+    # -- e-stop ----------------------------------------------------------------------------------
+
+    def estop(self, engaged: bool, reason: str):
+        """Engage (True) or clear (False) the e-stop on /estop, as this capability's node."""
+        self._ensure_open()
+        m = EStop(engaged=bool(engaged), source=self._node.get_name(), reason=reason)
+        m.header.stamp = self._node.get_clock().now().to_msg()
+        with self._open_lock:  # after _ensure_open() has made it
+            pub = self._pubs.get("/estop")
+        if pub is None:
+            self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+        _wait_matched(pub)
+        # Under _cond: end_action() clears _in_action under it before it destroys `pub`.
+        with self._cond:
+            if not self._in_action:
+                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+            pub.publish(m)
+
+
+def _wait_matched(pub):
+    """Wait up to PUBLISHER_MATCH_S for `pub` to have a subscriber."""
+    deadline = time.monotonic() + PUBLISHER_MATCH_S
+    while pub.get_subscription_count() == 0 and time.monotonic() < deadline:
+        time.sleep(POLL_S)
