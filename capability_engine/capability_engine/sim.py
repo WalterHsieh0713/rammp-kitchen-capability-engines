@@ -88,6 +88,11 @@ def set_model_provider(fn):
     _MODEL_PROVIDER = fn
 
 
+def has_model_provider() -> bool:
+    """Whether a driver model is registered (set_model_provider)."""
+    return _MODEL_PROVIDER is not None
+
+
 def set_keep_out(fn):
     """Fridge only: `fn(rb, joints) -> message if the arm is in a keep-out zone, else None`.
 
@@ -345,6 +350,19 @@ def solve_ik(scene, rb, pos, quat, seed_joints):
     if _KEEP_OUT is not None and _KEEP_OUT(rb, joints) is not None:
         return joints, KEEP_OUT_ERR
     return joints, err
+
+
+def tool_pose(scene, rb, q):
+    """Forward kinematics: the ee link's (position, quaternion xyzw) in the arm's base frame (the
+    frame solve_ik takes poses in) at arm joints `q`."""
+    c = rb.physics_client_id
+    for j, jj in enumerate(ARM):
+        p.resetJointState(rb.robot_id, jj, float(q[j]), physicsClientId=c)
+    ls = p.getLinkState(rb.robot_id, rb.end_effector_id, physicsClientId=c)
+    base = scene.robot_base_pose
+    inv_pos, inv_orn = p.invertTransform(base.position, base.orientation)
+    pos, orn = p.multiplyTransforms(inv_pos, inv_orn, ls[4], ls[5])
+    return np.array(pos), np.array(orn)
 
 
 def clearance(rb, q, bodies, closed=False):

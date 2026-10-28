@@ -1,10 +1,11 @@
 """SheppyArm's constants and pure path helpers: Cartesian paths to joint knots, and their timing.
 
 Copied from feeding-deployment microwave-wip@7bc328ae microwave/sheppy_arm.py. Free of rclpy; the
-`SheppyArm` class that drives the arm lives below the helpers (added later) and imports ROS lazily.
+`SheppyArm` class that drives the arm lives below the helpers and imports ROS lazily.
 """
 
 import logging
+import threading
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -194,3 +195,61 @@ def joint_trajectory(q0, knots, cart_lengths=None, speed_scale=1.0):
         1.875 * joint_travel / (JOINT_SPEED * speed_scale),
     )
     return _min_jerk_samples(path, s_knots, duration)
+
+
+class _StandaloneCtx:
+    """The action context of a bench script: nothing pauses or cancels it (Ctrl-C still cancels
+    a running goal and re-raises)."""
+
+    def checkpoint(self):
+        pass
+
+    def cancelled(self):
+        return False
+
+
+class SheppyArm:
+    """SheppyArm for bench scripts: self.arm's ArmInterface on its own node, spun by its own
+    MultiThreadedExecutor thread, always in an action until close(). No control token: under
+    enforced arbitration the driver refuses its commands. Every attribute is the ArmInterface's
+    (get_state(), move_joints(), last_path, monitor_stopped, ...)."""
+
+    def __init__(self, node_name="microwave_sheppy_arm"):
+        import rclpy
+        from rclpy.callback_groups import ReentrantCallbackGroup
+        from rclpy.executors import MultiThreadedExecutor
+        from rclpy.node import Node
+
+        from capability_engine.arm import ArmInterface  # here: arm imports this module
+
+        if not rclpy.ok():
+            rclpy.init()
+        self.node = Node(node_name)
+        self._exec = MultiThreadedExecutor()
+        self._exec.add_node(self.node)
+        threading.Thread(target=self._exec.spin, daemon=True).start()
+        self._arm = ArmInterface(self.node, ReentrantCallbackGroup(), standalone=True)
+        self._arm.begin_action(_StandaloneCtx(), token=None)
+        self._owns_model = not sim_mod.has_model_provider()
+        if self._owns_model:
+            sim_mod.set_model_provider(self._arm.robot_description)
+        try:
+            self._arm.get_state()  # as SheppyArm's constructor: wait for the arm's state
+        except BaseException:
+            self.close()
+            raise
+
+    def __getattr__(self, name):
+        arm = self.__dict__.get("_arm")
+        if arm is None:
+            raise AttributeError(name)
+        return getattr(arm, name)
+
+    def close(self):
+        """End the action (settling any goal or stream), then stop the executor and destroy the
+        node."""
+        self._arm.end_action()
+        if self._owns_model:
+            sim_mod.set_model_provider(None)
+        self._exec.shutdown()
+        self.node.destroy_node()

@@ -5,6 +5,10 @@ Its ROS entities exist only inside an action: the first arm call after `begin_ac
 them all (`_open`), and `end_action()` settles any goal or stream, destroys them and forgets the
 state they received. An action that never touches the arm costs nothing, and no state read in one
 action is returned in the next.
+
+In mock mode (`mock=True`) it is a dry run that makes no ROS entity at all: motions and goals log
+"mock: not sent" and succeed, and the state is the last commanded joints (from MOCK_JOINTS), with
+the tool pose from the sim's FK when a sim copy exists.
 """
 
 import copy
@@ -53,7 +57,7 @@ from rclpy.qos import (
 )
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import JointState
-from sheppy_arm import CONTINUOUS, ERRORS, JOINTS, TOOL_Z, _wrap
+from sheppy_arm import CONTINUOUS, ERRORS, JOINTS, _wrap
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectoryPoint
 
@@ -80,6 +84,7 @@ GOAL_ACCEPT_S = 5.0  # how long a motion waits for the driver to accept or rejec
 RESULT_MARGIN_S = 30.0  # a trajectory's result may come this long after its planned duration
 POLL_S = 0.01  # how often a running motion polls its result, its monitor and the action's cancel
 CANCEL_SETTLE_S = 0.4  # after cancelling a goal, how long to wait for the driver to settle it
+SUCCESSFUL = 0  # error_code of a goal that succeeded
 PREEMPTED = -6  # error_code of a goal settled by a cancel
 HALTED = -9  # error_code of a goal the driver halted: control taken, or an e-stop
 HALT_STATUS_WAIT_S = 0.2  # after a HALTED goal, how long to wait for /control_status to show
@@ -98,6 +103,8 @@ STREAM_TIMEOUT_S = 0.1  # stream(): the driver closes the session after this lon
 PUBLISHER_MATCH_S = 1.0  # how long a new setpoint or /estop publisher waits for the driver to
 # subscribe before its first message (DDS discovery), so that message is not lost
 CLOSE_STREAM_WAIT_S = 1.0  # how long closing a stream waits for /close_stream's answer
+MOCK_JOINTS = [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]  # mock mode: the joints it starts at
+MOCK_NOT_SENT = "mock: not sent"
 CONTROL_FROM_ORCHESTRATOR_MESSAGE = "control comes from the orchestrator"
 STREAM_ENDED_MESSAGE = "the stream is closed: send() works only inside its with block"
 
@@ -413,7 +420,7 @@ def _ee_state(m):
 
 def _tool_position(ee):
     """The tool frame's position: the flange + TOOL_Z along the flange z."""
-    return ee.position + R.from_quat(ee.orientation).apply([0.0, 0.0, TOOL_Z])
+    return ee.position + R.from_quat(ee.orientation).apply([0.0, 0.0, sheppy_arm.TOOL_Z])
 
 
 def _gripper_state(m):
@@ -537,6 +544,8 @@ class ArmInterface:
         self._goal = None  # the send future of the running goal: end_action() cancels it
         self._path_t0 = None  # time.monotonic() its goal started; set: /ee_state adds to last_path
         self._stream = None  # the open Stream: end_action() zeroes and closes it
+        self._mock_q = np.array(MOCK_JOINTS, float)  # mock mode: the last commanded joints
+        self._mock_gripper = 0.0  # mock mode: the last commanded gripper position (0 = open)
 
     # -- lifecycle ----------------------------------------------------------------------------
 
@@ -710,6 +719,47 @@ class ArmInterface:
         with self._cond:
             return self._cond.wait_for(estopped, timeout_s)
 
+    # -- mock mode ------------------------------------------------------------------------------
+
+    def _mock_sent(self, label, q=None):
+        """Mock mode: nothing goes to the driver. Log it; a joint target `q` becomes the state.
+        True, as for a motion that succeeded."""
+        self._check_in_action()
+        if q is not None:
+            self._mock_q = np.asarray(q, float).copy()
+        self._node.get_logger().info(f"  {label}: {MOCK_NOT_SENT}")
+        return True
+
+    def _mock_sim(self):
+        """Mock mode: the process's sim copy, or None when none exists (mock mode registers no
+        driver model, so make_sim() only returns a copy the capability built)."""
+        try:
+            return sim.make_sim()
+        except sim.SimModelError:
+            return None
+
+    def _mock_read(self, topic):
+        """Mock mode's state: the last commanded joints, at rest; the tool from the sim's FK when
+        a sim copy exists, else at the origin; no e-stop, no stream, no diagnostics."""
+        zeros = np.zeros(len(JOINTS))
+        if topic == "/joint_states":
+            return JointStates(self._mock_q.copy(), zeros, zeros.copy())
+        if topic == "/ee_state":
+            model = self._mock_sim()
+            if model is None:
+                pos, quat = np.zeros(3), R.identity().as_quat()
+            else:
+                pos, quat = sim.tool_pose(*model, self._mock_q)
+            flange = pos - R.from_quat(quat).apply([0.0, 0.0, sheppy_arm.TOOL_Z])
+            return EeState(sheppy_arm.FRAME, flange, quat, *(np.zeros(3) for _ in range(4)))
+        if topic == "/gripper_state":
+            return GripperState(self._mock_gripper, 0.0, 0.0, True)
+        if topic == "/control_status":
+            return ControlStatus(False, False, False, "", 0, 0)
+        if topic == "/stream_status":
+            return StreamStatus(False, "", [], 0.0, 0)
+        return Diagnostics([])
+
     # -- state --------------------------------------------------------------------------------
 
     def _store(self, topic, value):
@@ -746,6 +796,9 @@ class ArmInterface:
     def _read(self, topic, stale_s=None):
         """The latest value on `topic` with its age; an error when there is none, or when it is
         older than `stale_s` (None: never stale)."""
+        if self._mock:
+            self._check_in_action()
+            return self._mock_read(topic)
         self._ensure_open()
         latest = self._wait_for(topic)
         if latest is None:
@@ -799,6 +852,9 @@ class ArmInterface:
 
     def not_ready(self) -> str | None:
         """Why the arm must not be commanded now (from /control_status), or None when it may be."""
+        if self._mock:
+            self._check_in_action()
+            return None
         self._ensure_open()
         self._wait_for("/control_status")
         return self._driver.not_ready(sheppy_arm.SENDER_ID)
@@ -807,6 +863,8 @@ class ArmInterface:
         """The driver's URDF, from /arm/robot_description (latched), through a one-shot
         subscription destroyed after the first message. Opens none of the arm's other entities."""
         self._check_in_action()
+        if self._mock:
+            self._fail(ArmError, "mock mode: no driver, so no /arm/robot_description")
         received = {}
         done = threading.Event()
 
@@ -872,6 +930,8 @@ class ArmInterface:
         did -- cut into <= CART_STEP_M / CART_STEP_DEG steps before IK, the same density as
         `plan_cartesian`, so the joint path is the one the sim gates checked."""
         self._checkpoint()
+        if self._mock and self._mock_sim() is None:  # no model to solve the path on: joints stay
+            return self._mock_sent("move_cartesian")
         refusals = []
         knots, lengths = sheppy_arm.cartesian_knots(
             sim.make_sim(), self.get_state()["ee_pos"], self.raw_joints(), traj, log=refusals.append
@@ -901,6 +961,9 @@ class ArmInterface:
         within GO_TO_TRACK_M. `orientation_hold` (HOLD_*), `control_mode` (POSITION or IMPEDANCE)
         and `gains` (see impedance_gains()) are the driver's goal fields. `feedback`: called with
         each GoalFeedback, on the executor (it must not block)."""
+        if self._mock:
+            self._checkpoint()
+            return self._mock_sent(label)
         g = GoToEEPose.Goal()
         g.target = PoseStamped()
         g.target.header.frame_id = sheppy_arm.FRAME
@@ -933,6 +996,9 @@ class ArmInterface:
         """Joints to `q` (rad, J1..J7): cuRobo plans in joint space and the driver executes.
         Blocking; True if the driver succeeded and every joint ended within GO_TO_TRACK_DEG (free
         joints compared the short way). Keyword arguments as in go_to_ee_pose."""
+        if self._mock:
+            self._checkpoint()
+            return self._mock_sent(label, q)
         g = GoToJointConfig.Goal()
         g.target_joints = [float(x) for x in q]
         if not self._go_to(
@@ -954,9 +1020,12 @@ class ArmInterface:
         """The driver's named preset pose (its registry), planned by cuRobo and executed by the
         driver, like go_to_joint_config. Blocking; True if the driver succeeded. Keyword
         arguments as in go_to_ee_pose."""
+        label = f"go_to_preset {name}"
+        if self._mock:  # the presets are the driver's, unknown here: the joints stay
+            self._checkpoint()
+            return self._mock_sent(label)
         g = GoToPreset.Goal()
         g.preset_name = name
-        label = f"go_to_preset {name}"
         return self._go_to("go_to_preset", g, label, speed_scale, control_mode, gains, feedback)
 
     def _go_to(self, name, g, label, speed_scale, control_mode, gains, feedback):
@@ -1007,6 +1076,9 @@ class ArmInterface:
         self._ctx.checkpoint()
 
     def _send(self, t, q, qd, impedance=None, monitor=None):
+        if self._mock:
+            self.last_path, self.monitor_stopped = [], False
+            return self._mock_sent("trajectory", q[-1])
         ctx = self._ctx  # end_action() clears self._ctx; an ended action fails in not_ready()
         self._check_command()
         why = self.not_ready()
@@ -1198,6 +1270,9 @@ class ArmInterface:
         of the closing speed (default GRIPPER_SPEED). A cancel of the action stops the stream and
         raises Cancelled."""
         self._checkpoint()
+        if self._mock:
+            self._mock_gripper = float(position)
+            return self._mock_sent("gripper")
         ctx = self._ctx
         self._check_command()
         m = GripperSetpoint()
@@ -1259,6 +1334,12 @@ class ArmInterface:
             )
         gains = impedance_gains(gains)
         self._checkpoint()
+        if self._mock:  # the last point's joints become the state, when they are the arm's
+            points = list(points)
+            last = dict(zip(names, points[-1][1], strict=True)) if points else {}
+            q = [last[n] for n in JOINTS] if set(JOINTS) <= set(last) else None
+            self._mock_sent("execute_joint_trajectory", q)
+            return TrajectoryResult(SUCCESSFUL, "", np.zeros(len(names)))
         ctx = self._ctx
         self._check_command()
         why = self.not_ready()
@@ -1325,10 +1406,15 @@ class ArmInterface:
 
     def set_world(self, world: str) -> tuple[bool, str]:
         """Swap cuRobo's collision world for the packaged world `world`: (success, message)."""
+        if self._mock:
+            return self._mock_sent("set_world"), MOCK_NOT_SENT
         res = self._call("set_world", SetWorld.Request(world=world))
         return res.success, res.message
 
     def _plan_goal(self, name, g):
+        if self._mock:  # a successful plan with no samples
+            self._mock_sent(name)
+            return Plan(True, MOCK_NOT_SENT)
         self._ensure_open(wait_state=False)  # the planner needs no arm state
         ctx = self._ctx
         client = self._action(name)
@@ -1377,7 +1463,11 @@ class ArmInterface:
     # -- the driver's services -----------------------------------------------------------------
 
     def list_controllers(self) -> list[Controller]:
-        """The driver's streaming controllers, and whether each can be opened now."""
+        """The driver's streaming controllers, and whether each can be opened now (none in mock
+        mode)."""
+        if self._mock:
+            self._mock_sent("list_controllers")
+            return []
         res = self._call("list_controllers", ListControllers.Request())
         return [Controller(c.name, list(c.channels), bool(c.available)) for c in res.controllers]
 
@@ -1387,6 +1477,8 @@ class ArmInterface:
         token = self._driver.token
         if token is not None:
             req.token = list(token)
+        if self._mock:
+            return self._mock_sent("set_gains"), MOCK_NOT_SENT
         res = self._call("set_gains", req)
         return res.accepted, res.message
 
@@ -1458,18 +1550,24 @@ class ArmInterface:
     # -- streaming -------------------------------------------------------------------------------
 
     @contextmanager
-    def stream(self, controller: str, gains=None, timeout_s=STREAM_TIMEOUT_S):
+    def stream(self, controller: str, gains=None, timeout_s=None):
         """A streaming session on `controller` (see list_controllers()): yields a Stream to send()
-        setpoints on, at least every `timeout_s`. `gains` (see impedance_gains()) apply to
-        impedance controllers, at open. One session is one motion: a pause is honoured at open
-        only. Leaving the block, however (an exception, a cancel, the driver closing it), sends
-        the hold setpoint (zeros for twist and velocity controllers, the measured pose or joints
-        for pose and position ones; nothing for torque), closes the session and destroys its
-        publisher. ModeConflict while a goal or another stream runs; ArmError when the arm must
-        not be commanded or the driver has no such controller available."""
+        setpoints on, at least every `timeout_s` (default STREAM_TIMEOUT_S). `gains` (see
+        impedance_gains()) apply to impedance controllers, at open. One session is one motion: a
+        pause is honoured at open only. Leaving the block, however (an exception, a cancel, the
+        driver closing it), sends the hold setpoint (zeros for twist and velocity controllers, the
+        measured pose or joints for pose and position ones; nothing for torque), closes the
+        session and destroys its publisher. ModeConflict while a goal or another stream runs;
+        ArmError when the arm must not be commanded or the driver has no such controller
+        available. In mock mode the session opens and send() does nothing."""
         gains = impedance_gains(gains)
+        timeout_s = STREAM_TIMEOUT_S if timeout_s is None else timeout_s
         self._checkpoint()
         ctx, driver = self._ctx, self._driver
+        if self._mock:
+            self._mock_sent(f"stream {controller!r}")
+            yield Stream(self, controller, None, ctx, driver)
+            return
         self._check_command()
         why = self.not_ready()
         if why is not None:
@@ -1536,6 +1634,8 @@ class ArmInterface:
         return stream
 
     def _send_setpoint(self, stream, setpoint):
+        if self._mock:
+            return
         if self._stream is not stream:  # closed already: the block outlived it, or its action
             self._fail(NotInAction, STREAM_ENDED_MESSAGE)
         if stream._ctx.cancelled():
@@ -1618,6 +1718,9 @@ class ArmInterface:
     def estop(self, engaged: bool, reason: str):
         """Engage (True) or clear (False) the e-stop on /estop, as this capability's node. Sent at
         once: it waits for no arm state, only (up to PUBLISHER_MATCH_S) for a subscriber."""
+        if self._mock:
+            self._mock_sent("estop")
+            return
         self._ensure_open(wait_state=False)
         m = EStop(engaged=bool(engaged), source=self._node.get_name(), reason=reason)
         m.header.stamp = self._node.get_clock().now().to_msg()

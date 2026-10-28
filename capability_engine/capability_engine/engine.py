@@ -22,6 +22,7 @@ import threading
 from dataclasses import dataclass, field
 
 import rclpy
+import sheppy_arm
 from rammp_orchestrator_interfaces.action import ExecuteAction
 from rammp_orchestrator_interfaces.msg import (
     ActionAvailability,
@@ -39,11 +40,16 @@ from rammp_orchestrator_interfaces.srv import (
     UpdateObjectState,
     WriteWorldState,
 )
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
 from rclpy.node import Node
 from std_msgs.msg import String
+
+from capability_engine import sim
+from capability_engine.arm import ArmInterface
+from capability_engine.arm_params import PARAMS
 
 ORCHESTRATOR = "/rammp_orchestrator"
 REGISTER_RETRY_S = 5.0
@@ -137,16 +143,20 @@ class CapabilityEngine(Node):
     intents_handled: list[str] = []
     actions: list[Action] = []
 
-    def __init__(self, engine_id: str):
+    def __init__(self, engine_id: str, **node_kwargs):
         # The orchestrator addresses an engine as /<engine_id>/..., so the
-        # node name is the engine id.
-        super().__init__(engine_id)
+        # node name is the engine id. `node_kwargs` go to rclpy's Node.
+        super().__init__(engine_id, **node_kwargs)
         self.declare_parameter("use_orchestrator", True)
         self.declare_parameter("mock", False)
         self.orchestrated = self.get_parameter("use_orchestrator").value
         self.mock = self.get_parameter("mock").value
 
         self._group = ReentrantCallbackGroup()
+        self._declare_arm_params(engine_id)
+        self.arm = ArmInterface(self, self._group, mock=self.mock)
+        if not self.mock:  # mock mode has no driver: nothing may subscribe to its model
+            sim.set_model_provider(self.arm.robot_description)
         self._busy = threading.Lock()
         self._paused = threading.Event()
         self._cancel = threading.Event()
@@ -203,6 +213,16 @@ class CapabilityEngine(Node):
         """Drop any per-selection state. Default: nothing to drop."""
 
     # -- orchestrator plumbing ----------------------------------------------
+
+    def _declare_arm_params(self, engine_id):
+        """Declare every arm.<name> parameter and write its value to the constant it sets."""
+        for prm in PARAMS:
+            # The design: under the engine, the sender id on goals is the capability's.
+            default = engine_id if prm.target == (sheppy_arm, "SENDER_ID") else prm.default
+            value = self.declare_parameter(
+                f"arm.{prm.name}", default, ParameterDescriptor(description=prm.description)
+            ).value
+            setattr(*prm.target, list(value) if isinstance(prm.default, list) else value)
 
     def _manifest(self) -> CapabilityManifest:
         return CapabilityManifest(
@@ -318,9 +338,12 @@ class CapabilityEngine(Node):
             self._paused.clear()
             self._active_action = goal.action_id
             self._publish_status()
+            ctx = Context(self, goal_handle)
+            # Follow-up: ExecuteAction carries no control token yet, so self.arm sends none.
+            self.arm.begin_action(ctx, token=None)
             try:
                 params = json.loads(goal.params_json or "{}")
-                payload = self.execute(goal.action_id, params, Context(self, goal_handle))
+                payload = self.execute(goal.action_id, params, ctx)
                 result.status = Result.STATUS_SUCCESS
                 result.payload_json = json.dumps(payload or {})
             except Cancelled:
@@ -335,6 +358,7 @@ class CapabilityEngine(Node):
                 result.error_code = "exception"
                 self.get_logger().error(f"{goal.action_id} raised: {error!r}")
             finally:
+                self.arm.end_action()  # settles any goal or stream, destroys the arm's entities
                 self._active_action = ""
 
         # canceled() is only a legal transition after an action-level cancel
