@@ -52,9 +52,12 @@ lint:
 # self.arm tests, in an x86 ROS 2 Humble image with the repo mounted at /repo (edits need
 # no rebuild). Directories that do not exist yet are skipped. ARGS replaces the paths:
 #   make test-arm ARGS=tests/arm/test_sim.py -k golden
+# ARM_CMD replaces pytest with another command in the same container:
+#   make test-arm ARM_CMD='python3 /repo/scripts/compare_models.py'
+ARM_CMD ?= python3 -m pytest -q -p no:cacheprovider $(or $(ARGS),$(ARM_TEST_DIRS))
 ARM_TEST_IMAGE = rammp-arm-test:dev
 ARM_TEST_DIRS = $(wildcard capability_engine/test tests/arm)
 test-arm:
 	docker build -f docker/test.Dockerfile -t $(ARM_TEST_IMAGE) docker
 	docker run --rm --user $$(id -u):$$(id -g) -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 \
-		-v $(CURDIR):/repo $(ARM_TEST_IMAGE) python3 -m pytest -q -p no:cacheprovider $(or $(ARGS),$(ARM_TEST_DIRS))
+		-v $(CURDIR):/repo $(ARM_TEST_IMAGE) $(ARM_CMD)
