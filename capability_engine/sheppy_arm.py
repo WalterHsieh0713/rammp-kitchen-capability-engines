@@ -220,7 +220,7 @@ class SheppyArm:
         from rclpy.executors import MultiThreadedExecutor
         from rclpy.node import Node
 
-        from capability_engine.arm import ArmInterface  # here: arm imports this module
+        from capability_engine import arm  # here: arm imports this module
 
         if not rclpy.ok():
             rclpy.init()
@@ -228,13 +228,19 @@ class SheppyArm:
         self._exec = MultiThreadedExecutor()
         self._exec.add_node(self.node)
         threading.Thread(target=self._exec.spin, daemon=True).start()
-        self._arm = ArmInterface(self.node, ReentrantCallbackGroup(), standalone=True)
-        self._arm.begin_action(_StandaloneCtx(), token=None)
+        self._arm = arm.ArmInterface(self.node, ReentrantCallbackGroup(), standalone=True)
+        ctx = _StandaloneCtx()
+        self._arm.begin_action(ctx, token=None)
         self._owns_model = not sim_mod.has_model_provider()
         if self._owns_model:
             sim_mod.set_model_provider(self._arm.robot_description)
         try:
-            self._arm.get_state()  # as SheppyArm's constructor: wait for the arm's state
+            # As SheppyArm's constructor: wait for the arm's state, then the trajectory server
+            # (polled in POLL_S slices by the arm's own wait).
+            self._arm.get_state()
+            client = self._arm._action("execute_joint_trajectory")
+            if not self._arm._wait_for_server(client, ctx, arm.STATE_WAIT_S):
+                raise RuntimeError("no /execute_joint_trajectory action server")
         except BaseException:
             self.close()
             raise

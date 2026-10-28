@@ -2,7 +2,8 @@
 
 `CapabilityEngine.__init__` declares each one with today's value as its default and writes the
 value it gets to `target`, the module constant the code reads at call time (callers may still
-mutate those constants at runtime, as SheppyArm's did).
+mutate those constants at runtime, as SheppyArm's did). The values are therefore process-wide, and
+the engine refuses arm.* changes after startup.
 """
 
 from dataclasses import dataclass
@@ -82,4 +83,5 @@ PARAMS = [
     _param(arm, "PUBLISHER_MATCH_S", "Wait for a new publisher to reach the driver (s)"),
     _param(arm, "CLOSE_STREAM_WAIT_S", "Wait for /close_stream's answer (s)"),
     _param(arm, "MOCK_JOINTS", "Mock mode: the joints it starts at (rad, J1..J7)"),
+    _param(arm, "MOCK_URDF", "Mock mode: the URDF file make_sim() loads (empty: none)"),
 ]

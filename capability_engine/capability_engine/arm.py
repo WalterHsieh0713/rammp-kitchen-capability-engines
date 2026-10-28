@@ -8,7 +8,8 @@ action is returned in the next.
 
 In mock mode (`mock=True`) it is a dry run that makes no ROS entity at all: motions and goals log
 "mock: not sent" and succeed, and the state is the last commanded joints (from MOCK_JOINTS), with
-the tool pose from the sim's FK when a sim copy exists.
+the tool pose from the sim's FK when a sim exists or can be built from MOCK_URDF. That FK sets the
+arm joints of the process's one shared sim copy, as solve_ik does.
 """
 
 import copy
@@ -16,6 +17,7 @@ import threading
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import numpy as np
 import sheppy_arm
@@ -104,7 +106,9 @@ PUBLISHER_MATCH_S = 1.0  # how long a new setpoint or /estop publisher waits for
 # subscribe before its first message (DDS discovery), so that message is not lost
 CLOSE_STREAM_WAIT_S = 1.0  # how long closing a stream waits for /close_stream's answer
 MOCK_JOINTS = [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]  # mock mode: the joints it starts at
+MOCK_URDF = ""  # mock mode: the URDF file make_sim() loads ("": none, make_sim() refuses)
 MOCK_NOT_SENT = "mock: not sent"
+MOCK_NO_MODEL_MESSAGE = "mock mode has no driver model: set arm.mock_urdf to a URDF file"
 CONTROL_FROM_ORCHESTRATOR_MESSAGE = "control comes from the orchestrator"
 STREAM_ENDED_MESSAGE = "the stream is closed: send() works only inside its with block"
 
@@ -325,18 +329,25 @@ def _seconds(d):
     return d.sec + d.nanosec * 1e-9
 
 
-def _plan(res):
-    """A planner's result as a Plan, its joints reordered to JOINTS; None when its joints are
-    not arm_joint_1..7 or joint_1..7 (the sim's rule: cuRobo's config names them joint_<i>) or
-    a point lacks positions or velocities for them."""
-    names = list(res.trajectory.joint_names)
+def _joint_index(names):
+    """Where arm_joint_1..7 are in `names`, in JOINTS order, when `names` are exactly those or
+    joint_1..7 (the sim's rule: cuRobo's config names them joint_<i>); None otherwise."""
+    names = list(names)
     for fmt in ("arm_joint_{}", "joint_{}"):
         wanted = [fmt.format(i) for i in range(1, len(JOINTS) + 1)]
         if sorted(names) == sorted(wanted):
-            break
-    else:
+            return [names.index(n) for n in wanted]
+    return None
+
+
+def _plan(res):
+    """A planner's result as a Plan, its joints reordered to JOINTS; None when its joints are
+    not arm_joint_1..7 or joint_1..7 (_joint_index) or a point lacks positions or velocities
+    for them."""
+    names = list(res.trajectory.joint_names)
+    idx = _joint_index(names)
+    if idx is None:
         return None
-    idx = [names.index(n) for n in wanted]
     points = res.trajectory.points
     if any(len(p.positions) != len(names) or len(p.velocities) != len(names) for p in points):
         return None
@@ -731,8 +742,8 @@ class ArmInterface:
         return True
 
     def _mock_sim(self):
-        """Mock mode: the process's sim copy, or None when none exists (mock mode registers no
-        driver model, so make_sim() only returns a copy the capability built)."""
+        """Mock mode: the process's sim copy (built from MOCK_URDF, through the model provider,
+        if none exists yet), or None when there is none and no MOCK_URDF to build it from."""
         try:
             return sim.make_sim()
         except sim.SimModelError:
@@ -740,7 +751,8 @@ class ArmInterface:
 
     def _mock_read(self, topic):
         """Mock mode's state: the last commanded joints, at rest; the tool from the sim's FK when
-        a sim copy exists, else at the origin; no e-stop, no stream, no diagnostics."""
+        there is a sim (which sets the shared sim's arm joints), else at the origin; no e-stop,
+        no stream, no diagnostics."""
         zeros = np.zeros(len(JOINTS))
         if topic == "/joint_states":
             return JointStates(self._mock_q.copy(), zeros, zeros.copy())
@@ -861,10 +873,14 @@ class ArmInterface:
 
     def robot_description(self) -> str:
         """The driver's URDF, from /arm/robot_description (latched), through a one-shot
-        subscription destroyed after the first message. Opens none of the arm's other entities."""
+        subscription destroyed after the first message. Opens none of the arm's other entities.
+        In mock mode, MOCK_URDF's text; SimModelError when it is unset (this is make_sim()'s
+        model provider, and a missing model is a sim error)."""
         self._check_in_action()
         if self._mock:
-            self._fail(ArmError, "mock mode: no driver, so no /arm/robot_description")
+            if not MOCK_URDF:
+                raise sim.SimModelError(MOCK_NO_MODEL_MESSAGE)
+            return Path(MOCK_URDF).read_text()
         received = {}
         done = threading.Event()
 
@@ -928,7 +944,8 @@ class ArmInterface:
         """`traj`: [(pos, quat xyzw), ...] in the base frame, like CartesianTrajectoryCommand. Each
         segment (from the current pose) is a straight line with slerped orientation -- what Kortex
         did -- cut into <= CART_STEP_M / CART_STEP_DEG steps before IK, the same density as
-        `plan_cartesian`, so the joint path is the one the sim gates checked."""
+        `plan_cartesian`, so the joint path is the one the sim gates checked. In mock mode with a
+        sim the same gates run, so a path the real arm would refuse returns False here too."""
         self._checkpoint()
         if self._mock and self._mock_sim() is None:  # no model to solve the path on: joints stay
             return self._mock_sent("move_cartesian")
@@ -1335,9 +1352,16 @@ class ArmInterface:
         gains = impedance_gains(gains)
         self._checkpoint()
         if self._mock:  # the last point's joints become the state, when they are the arm's
-            points = list(points)
-            last = dict(zip(names, points[-1][1], strict=True)) if points else {}
-            q = [last[n] for n in JOINTS] if set(JOINTS) <= set(last) else None
+            points, idx, q = list(points), _joint_index(names), None
+            if points:
+                last = np.asarray(points[-1][1], float)
+                if last.shape != (len(names),):
+                    self._fail(
+                        ArmError,
+                        f"execute_joint_trajectory: a point has {last.size} positions for "
+                        f"{len(names)} joints",
+                    )
+                q = None if idx is None else last[idx]
             self._mock_sent("execute_joint_trajectory", q)
             return TrajectoryResult(SUCCESSFUL, "", np.zeros(len(names)))
         ctx = self._ctx
@@ -1473,12 +1497,12 @@ class ArmInterface:
 
     def set_gains(self, gains) -> tuple[bool, str]:
         """The session's default impedance gains (see impedance_gains()): (accepted, message)."""
+        if self._mock:
+            return self._mock_sent("set_gains"), MOCK_NOT_SENT
         req = SetGains.Request(spec=impedance_gains(gains))
         token = self._driver.token
         if token is not None:
             req.token = list(token)
-        if self._mock:
-            return self._mock_sent("set_gains"), MOCK_NOT_SENT
         res = self._call("set_gains", req)
         return res.accepted, res.message
 

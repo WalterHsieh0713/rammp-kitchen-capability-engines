@@ -169,7 +169,8 @@ def counts(node):
 
 
 class FakeDriver(Node):
-    def __init__(self, node_name="fake_arm_driver"):
+    def __init__(self, node_name="fake_arm_driver", without_actions=()):
+        """`without_actions`: short names of actions not to serve (a driver missing them)."""
         super().__init__(node_name)
         self._group = ReentrantCallbackGroup()
         self._lock = threading.Lock()
@@ -216,8 +217,11 @@ class FakeDriver(Node):
         self._publish_control_status()
         self.publish_stream_status(False)
 
+        self._action_servers = []  # destroyed with the node, so none outlives it in the graph
         for name, (action_type, path) in ACTIONS.items():
-            ActionServer(
+            if name in without_actions:
+                continue
+            server = ActionServer(
                 self,
                 action_type,
                 path,
@@ -226,6 +230,7 @@ class FakeDriver(Node):
                 cancel_callback=lambda _, n=name: self._on_cancel(n),
                 callback_group=self._group,
             )
+            self._action_servers.append(server)
         for name, (srv_type, path) in SERVICES.items():
             handler = getattr(self, f"_srv_{name}")
             self.create_service(
@@ -249,6 +254,13 @@ class FakeDriver(Node):
         self.create_timer(
             1.0 / DIAGNOSTICS_HZ, self._publish_diagnostics, callback_group=self._group
         )
+
+    def destroy_node(self):
+        # rclpy's destroy_node() leaves action servers alive, and their handles keep the node in
+        # the graph: a later test would still find this fake's servers.
+        for server in self._action_servers:
+            server.destroy()
+        super().destroy_node()
 
     # -- test controls: state -------------------------------------------------------------------
 

@@ -40,7 +40,7 @@ from rammp_orchestrator_interfaces.srv import (
     UpdateObjectState,
     WriteWorldState,
 )
-from rcl_interfaces.msg import ParameterDescriptor
+from rcl_interfaces.msg import ParameterDescriptor, SetParametersResult
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import ExternalShutdownException, MultiThreadedExecutor
@@ -52,6 +52,7 @@ from capability_engine.arm import ArmInterface
 from capability_engine.arm_params import PARAMS
 
 ORCHESTRATOR = "/rammp_orchestrator"
+ARM_PARAMS_FIXED_MESSAGE = "arm.* parameters are read at startup; restart to change"
 REGISTER_RETRY_S = 5.0
 CALL_TIMEOUT_S = 10.0
 INTENT_TIMEOUT_S = 120.0
@@ -154,9 +155,10 @@ class CapabilityEngine(Node):
 
         self._group = ReentrantCallbackGroup()
         self._declare_arm_params(engine_id)
+        self.add_on_set_parameters_callback(self._on_set_parameters)
         self.arm = ArmInterface(self, self._group, mock=self.mock)
-        if not self.mock:  # mock mode has no driver: nothing may subscribe to its model
-            sim.set_model_provider(self.arm.robot_description)
+        # make_sim() loads the driver's model (in mock mode, arm.mock_urdf's)
+        sim.set_model_provider(self.arm.robot_description)
         self._busy = threading.Lock()
         self._paused = threading.Event()
         self._cancel = threading.Event()
@@ -215,7 +217,8 @@ class CapabilityEngine(Node):
     # -- orchestrator plumbing ----------------------------------------------
 
     def _declare_arm_params(self, engine_id):
-        """Declare every arm.<name> parameter and write its value to the constant it sets."""
+        """Declare every arm.<name> parameter and write its value to the constant it sets. Those
+        are module constants, so the values are process-wide: the last engine made sets them."""
         for prm in PARAMS:
             # The design: under the engine, the sender id on goals is the capability's.
             default = engine_id if prm.target == (sheppy_arm, "SENDER_ID") else prm.default
@@ -223,6 +226,12 @@ class CapabilityEngine(Node):
                 f"arm.{prm.name}", default, ParameterDescriptor(description=prm.description)
             ).value
             setattr(*prm.target, list(value) if isinstance(prm.default, list) else value)
+
+    def _on_set_parameters(self, params):
+        """Refuse arm.* changes after startup: their values were written once, in __init__."""
+        if any(prm.name.startswith("arm.") for prm in params):
+            return SetParametersResult(successful=False, reason=ARM_PARAMS_FIXED_MESSAGE)
+        return SetParametersResult(successful=True)
 
     def _manifest(self) -> CapabilityManifest:
         return CapabilityManifest(
@@ -339,9 +348,9 @@ class CapabilityEngine(Node):
             self._active_action = goal.action_id
             self._publish_status()
             ctx = Context(self, goal_handle)
-            # Follow-up: ExecuteAction carries no control token yet, so self.arm sends none.
-            self.arm.begin_action(ctx, token=None)
             try:
+                # Follow-up: ExecuteAction carries no control token yet, so self.arm sends none.
+                self.arm.begin_action(ctx, token=None)
                 params = json.loads(goal.params_json or "{}")
                 payload = self.execute(goal.action_id, params, ctx)
                 result.status = Result.STATUS_SUCCESS

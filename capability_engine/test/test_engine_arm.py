@@ -1,11 +1,9 @@
 """self.arm in the engine: per-action resources, parameters, the sim model, standalone SheppyArm
 and mock mode. Each engine runs beside a FakeDriver and is driven through its execute_action."""
 
-import importlib.util
 import threading
 import time
 import xml.etree.ElementTree as ET
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -15,24 +13,18 @@ import sheppy_arm
 from fake_driver import FLATBOT_URDF, FakeDriver, counts
 from rammp_orchestrator_interfaces.action import ExecuteAction
 from rammp_orchestrator_interfaces.msg import Result
+from rcl_interfaces.msg import Log
 from rclpy.action import ActionClient
+from rclpy.exceptions import InvalidHandle
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 
+from capability_engine import arm as arm_module
 from capability_engine import sim
 from capability_engine.arm_params import PARAMS
-from capability_engine.driver_state import NotInAction
+from capability_engine.driver_state import ArmError, NotInAction
 from capability_engine.engine import Action, CapabilityEngine
-
-# tests/arm/conftest.py holds the Cornell sim. Loaded by path under its own name, as in
-# test_arm_motion.py: `from conftest import ...` reaches whichever conftest pytest loaded last.
-_spec = importlib.util.spec_from_file_location(
-    "arm_goldens_engine", Path(__file__).parents[2] / "tests" / "arm" / "conftest.py"
-)
-_goldens = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(_goldens)
-cornell_sim = _goldens.cornell_sim
 
 WAIT_S = 5.0  # how long a test waits for a server, a goal's acceptance or a node to go
 ACTION_WAIT_S = 30.0  # how long a test waits for an action's result
@@ -41,6 +33,7 @@ ENGINE_ID = "arm_test_engine"
 TARGET = [0.3] * 7  # the joint target of the tests' moves
 STRUCTURE = {"JOINTS", "CONTINUOUS", "ERRORS", "IMPEDANCE"}  # sheppy_arm constants, not tunables
 CART_STEP = np.array([0.02, 0.0, 0.0])  # the mock Cartesian move: 2 cm along x
+SHORT_WAIT_S = 0.5  # STATE_WAIT_S in the test of a driver with no trajectory server
 
 
 def wait_until(condition, timeout_s=WAIT_S):
@@ -70,6 +63,8 @@ def env(ros):
     sim.reset_for_tests()
     fake = FakeDriver()
     client_node = Node("engine_arm_test_client")
+    logs = []  # every /rosout line: mock mode's "not sent" is only logged
+    client_node.create_subscription(Log, "/rosout", logs.append, 100)
     executor = MultiThreadedExecutor()
     executor.add_node(fake)
     executor.add_node(client_node)
@@ -98,7 +93,7 @@ def env(ros):
         finally:
             client.destroy()
 
-    yield SimpleNamespace(fake=fake, make=make, run=run)
+    yield SimpleNamespace(fake=fake, make=make, run=run, logs=logs)
     executor.shutdown()
     spinner.join()
     for engine in engines:
@@ -203,6 +198,15 @@ def test_params_declared_with_defaults(env):
     assert sheppy_arm.SENDER_ID == ENGINE_ID
 
 
+def test_arm_params_refused_after_startup(env):
+    engine = env.make(lambda engine, ctx: {})
+    (res,) = engine.set_parameters([Parameter("arm.cart_speed", value=0.2)])
+    assert not res.successful
+    assert res.reason == "arm.* parameters are read at startup; restart to change"
+    assert engine.get_parameter("arm.cart_speed").value == sheppy_arm.CART_SPEED
+    assert sheppy_arm.CART_SPEED != 0.2
+
+
 def test_sim_provider_uses_robot_description(env):
     seen = {}
 
@@ -220,8 +224,16 @@ def test_sim_provider_uses_robot_description(env):
     assert "driver model is live" in str(seen["explicit"])
 
 
+def assert_destroyed(node, other):
+    """`node` is destroyed: its handle is gone and the graph (seen from `other`) lost it."""
+    with pytest.raises(InvalidHandle):
+        node.get_name()
+    wait_until(lambda: "sheppy_arm_test" not in other.get_node_names())
+
+
 def test_standalone_sheppy_arm(env):
     arm = sheppy_arm.SheppyArm(node_name="sheppy_arm_test")
+    node = arm.node
     try:
         assert sim.has_model_provider()
         assert set(arm.get_state()) == {"position", "velocity", "effort", "ee_pos", "gripper_pos"}
@@ -233,7 +245,34 @@ def test_standalone_sheppy_arm(env):
     finally:
         arm.close()
     assert not sim.has_model_provider()  # the closed arm's provider is gone with it
+    assert_destroyed(node, env.fake)
     wait_until(lambda: env.fake.count_subscribers("/joint_states") == 0)
+
+
+def test_standalone_sheppy_arm_needs_trajectory_server(ros, monkeypatch):
+    monkeypatch.setattr(arm_module, "STATE_WAIT_S", SHORT_WAIT_S)
+    sim.reset_for_tests()
+    fake = FakeDriver(without_actions=("execute_joint_trajectory",))
+    executor = MultiThreadedExecutor()
+    executor.add_node(fake)
+    spinner = threading.Thread(target=executor.spin, daemon=True)
+    spinner.start()
+    try:
+        # An earlier test's fake driver may linger in the graph until discovery drops it.
+        send_goal = "/execute_joint_trajectory/_action/send_goal"
+        wait_until(lambda: send_goal not in dict(fake.get_service_names_and_types()))
+        with pytest.raises(RuntimeError) as raised:
+            sheppy_arm.SheppyArm(node_name="sheppy_arm_test")
+        assert type(raised.value) is RuntimeError
+        assert str(raised.value) == "no /execute_joint_trajectory action server"
+        assert not sim.has_model_provider()  # the failed constructor closed itself
+        wait_until(lambda: "sheppy_arm_test" not in fake.get_node_names())
+        wait_until(lambda: fake.count_subscribers("/joint_states") == 0)
+    finally:
+        executor.shutdown()
+        spinner.join()
+        fake.destroy_node()
+        sim.reset_for_tests()
 
 
 def test_mock_dry_run(env):
@@ -253,6 +292,10 @@ def test_mock_dry_run(env):
         seen["not_ready"] = arm.not_ready()
         with arm.stream("ee_twist") as stream:
             stream.send(np.zeros(6))
+        try:
+            sim.make_sim()
+        except sim.SimModelError as e:
+            seen["make_sim"] = e
         seen["counts"] = counts(engine)
 
     engine = env.make(body, mock=True)
@@ -267,6 +310,14 @@ def test_mock_dry_run(env):
     np.testing.assert_allclose(seen["after_pose"], np.zeros(7))  # a pose target leaves them
     assert seen["grip"] == 1.0
     assert seen["not_ready"] is None
+    assert str(seen["make_sim"]) == (
+        "mock mode has no driver model: set arm.mock_urdf to a URDF file"
+    )
+    wait_until(
+        lambda: any(
+            m.name == ENGINE_ID and m.msg == "  trajectory: mock: not sent" for m in env.logs
+        )
+    )
     assert seen["counts"] == base  # no ROS entity to the driver at all
     assert counts(engine) == base
     assert not any(env.fake.goals.values())
@@ -279,14 +330,40 @@ def test_mock_tool_pose_from_sim(env):
 
     def body(engine, ctx):
         arm = engine.arm
-        _, rb = cornell_sim()  # mock registers no driver model, so a path is allowed
-        ee = arm.get_state()["ee_pos"]
+        ee = arm.get_state()["ee_pos"]  # FK on the sim built from arm.mock_urdf
+        _, rb = sim.make_sim()
+        seen["robot"] = p.getBodyInfo(rb.robot_id, physicsClientId=rb.physics_client_id)[1]
         target = ee[:3] + CART_STEP
         seen["moved"] = arm.move_cartesian([(target, ee[3:])])
-        seen["target"], seen["ee"] = target, arm.get_state()["ee_pos"]
+        seen["start"], seen["target"], seen["ee"] = ee, target, arm.get_state()["ee_pos"]
+
+    engine = env.make(body, **{"mock": True, "arm.mock_urdf": str(FLATBOT_URDF)})
+    assert env.run(engine).status == Result.STATUS_SUCCESS
+    assert seen["robot"].decode() == ET.parse(FLATBOT_URDF).getroot().get("name")
+    assert np.linalg.norm(seen["start"][:3]) > CART_STEP[0]  # not the no-model origin
+    assert seen["moved"]
+    np.testing.assert_allclose(seen["ee"][:3], seen["target"], atol=sim.MAX_IK_ERR)
+    assert not any(env.fake.goals.values())
+
+
+def test_mock_raw_trajectory(env):
+    seen = {}
+    names = [f"joint_{i}" for i in range(7, 0, -1)]  # cuRobo's names, J7 first
+    q = np.arange(1, 8) / 10.0  # J1..J7
+
+    def body(engine, ctx):
+        arm = engine.arm
+        res = arm.execute_joint_trajectory(names, [(1.0, q[::-1], np.zeros(7))])
+        seen["code"], seen["q"] = res.error_code, arm.raw_joints()
+        try:
+            arm.execute_joint_trajectory(names, [(1.0, q[:3], np.zeros(3))])
+        except ArmError as e:
+            seen["short"] = e
 
     engine = env.make(body, mock=True)
     assert env.run(engine).status == Result.STATUS_SUCCESS
-    assert seen["moved"]
-    np.testing.assert_allclose(seen["ee"][:3], seen["target"], atol=sim.MAX_IK_ERR)
+    assert seen["code"] == 0
+    np.testing.assert_allclose(seen["q"], q)
+    assert type(seen["short"]) is ArmError
+    assert "3 positions for 7 joints" in str(seen["short"])
     assert not any(env.fake.goals.values())
