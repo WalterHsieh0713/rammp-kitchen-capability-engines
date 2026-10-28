@@ -93,9 +93,9 @@ class Context:
     def checkpoint(self):
         """Call between steps: blocks while paused, raises Cancelled if cancelled."""
         engine = self._engine
-        while engine._paused.is_set() and not engine._cancel.is_set():
+        while engine._paused.is_set() and not self.cancelled():
             engine._cancel.wait(0.1)
-        if engine._cancel.is_set() or self._goal.is_cancel_requested:
+        if self.cancelled():
             raise Cancelled()
 
     def cancelled(self) -> bool:

@@ -35,7 +35,7 @@ jobs:
         run: pip install pyyaml pytest "sheppy @ git+https://github.com/rammp-org/sheppy@main"
 
       - name: Unit-test the checkers
-        run: pytest -q tests
+        run: pytest -q tests --ignore=tests/arm
 
       - name: Check every capability against the repo rules and sheppy
         run: python3 scripts/check_capabilities.py

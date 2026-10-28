@@ -30,7 +30,9 @@ _spec.loader.exec_module(_goldens)
 G, cornell_sim = _goldens.G, _goldens.cornell_sim
 
 HOLD_S = 5.0  # how long the fake runs a goal in the tests that need one running
-SEIZE_AFTER_S = 0.3  # when another sender takes control in the HALTED test
+SEIZE_AFTER_S = 0.3  # when another sender takes control, or the arm e-stops, mid-goal
+STATUS_LATE_S = 0.1  # how long after the goal halts the e-stopped /control_status arrives
+PAUSE_S = 0.3  # how long a paused action is held before resume
 
 
 def pt_time(p):
@@ -75,15 +77,20 @@ def test_move_joints_sends_golden_trajectory(arm_env):
         arm.end_action()
 
 
+def set_tool_pose(fake, q, ee):
+    """Joints `q`, and the flange placed so the arm reads tool pose `ee` (the golden's frame)."""
+    ee = np.asarray(ee, float)
+    fake.set_joints(q)
+    fake.set_flange(ee[:3] - R.from_quat(ee[3:]).apply([0.0, 0.0, TOOL_Z]), ee[3:])
+
+
 def test_move_cartesian_sends_golden(arm_env):
     arm, _, fake = arm_env
     cornell_sim()  # the process's one sim: the arm's make_sim() returns this copy
     assert cases("move_cartesian")
     for case in cases("move_cartesian"):
-        ee0 = np.asarray(case["ee0"], float)  # the tool frame; /ee_state is the flange
-        flange = ee0[:3] - R.from_quat(ee0[3:]).apply([0.0, 0.0, TOOL_Z])
-        fake.set_joints(case["q0"])
-        fake.set_flange(flange, ee0[3:])
+        ee0 = np.asarray(case["ee0"], float)
+        set_tool_pose(fake, case["q0"], ee0)
         arm.begin_action(FakeCtx(), None)
         np.testing.assert_allclose(arm.get_state()["ee_pos"], ee0, atol=1e-12)
         traj = [(pos, quat) for pos, quat in case["traj"]]
@@ -95,7 +102,7 @@ def test_move_cartesian_sends_golden(arm_env):
 def test_token_attached_when_given(arm_env):
     arm, _, fake = arm_env
     arm.begin_action(FakeCtx(), b"\x01" * 16)
-    arm.move_joints([[0.3] * 7])
+    assert arm.move_joints([[0.3] * 7]) is True
     assert bytes(fake.goals["execute_joint_trajectory"][-1].token) == b"\x01" * 16
 
 
@@ -184,6 +191,28 @@ def test_halted_with_token_is_control_taken(arm_env):
         arm.move_joints([[0.3] * 7])
 
 
+def test_estopped_before_sending_returns_false(arm_env):
+    arm, _, fake = arm_env
+    fake.engage_estop()
+    arm.begin_action(FakeCtx(), b"\x01" * 16)
+    assert arm.move_joints([[0.3] * 7]) is False
+    assert "arm is E-STOPPED -- clear it first" in fake_logs(arm)
+    assert not fake.goals["execute_joint_trajectory"]
+
+
+@pytest.mark.parametrize(
+    "status_delay_s", [0.0, STATUS_LATE_S], ids=["status_first", "result_first"]
+)
+def test_estop_mid_goal_with_token_returns_false(arm_env, status_delay_s):
+    arm, _, fake = arm_env
+    fake.hold_goals(HOLD_S)
+    arm.begin_action(FakeCtx(), b"\x01" * 16)
+    threading.Timer(SEIZE_AFTER_S, fake.engage_estop, args=(status_delay_s,)).start()
+    assert arm.move_joints([[0.3] * 7]) is False  # SheppyArm's failure, not ControlTaken
+    assert "trajectory ended HALTED" in fake_logs(arm)
+    assert arm._driver.token == b"\x01" * 16  # an e-stop is not a takeover
+
+
 def test_halted_without_token_returns_false(arm_env):
     arm, _, fake = arm_env
     fake.set_result("execute_joint_trajectory", -9)
@@ -196,7 +225,10 @@ def test_end_action_cancels_a_running_goal(arm_env):
     arm, _, fake = arm_env
     fake.hold_goals(HOLD_S)
     arm.begin_action(FakeCtx(), None)
-    motion = threading.Thread(target=arm.move_joints, args=([[0.3] * 7],), daemon=True)
+    result = []
+    motion = threading.Thread(
+        target=lambda: result.append(arm.move_joints([[0.3] * 7])), daemon=True
+    )
     motion.start()
     deadline = time.monotonic() + HOLD_S
     while not fake.goals["execute_joint_trajectory"] and time.monotonic() < deadline:
@@ -206,6 +238,38 @@ def test_end_action_cancels_a_running_goal(arm_env):
     assert fake.cancelled("execute_joint_trajectory")
     motion.join(HOLD_S)
     assert not motion.is_alive()
+    assert result == [False]
+    assert arm.last_error == "action ended"
+
+
+def test_pause_holds_the_send_until_resume(arm_env):
+    arm, _, fake = arm_env
+    ctx = FakeCtx()
+    ctx.pause()
+    arm.begin_action(ctx, None)
+    result = []
+    motion = threading.Thread(
+        target=lambda: result.append(arm.move_joints([[0.3] * 7])), daemon=True
+    )
+    motion.start()
+    time.sleep(PAUSE_S)
+    assert motion.is_alive()
+    assert not fake.goals["execute_joint_trajectory"]
+    ctx.resume()
+    motion.join(HOLD_S)
+    assert result == [True]
+    assert len(fake.goals["execute_joint_trajectory"]) == 1
+
+
+def test_ik_refusal_sets_last_error(arm_env):
+    arm, _, fake = arm_env
+    cornell_sim()
+    case = next(c for c in G["cartesian_knots"] if c["knots"] is None)
+    set_tool_pose(fake, case["q_start"], case["ee_start"])
+    arm.begin_action(FakeCtx(), None)
+    assert arm.move_cartesian([(pos, quat) for pos, quat in case["traj"]]) is False
+    assert "IK err" in fake_logs(arm) and fake_logs(arm).endswith("-- nothing sent.")
+    assert not fake.goals["execute_joint_trajectory"]
 
 
 def test_last_path_records_the_tool_point(arm_env):

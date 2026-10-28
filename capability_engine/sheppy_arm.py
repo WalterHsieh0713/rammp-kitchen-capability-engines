@@ -114,12 +114,13 @@ def _min_jerk_samples(path, s_knots, duration):
     return t, q, qd
 
 
-def cartesian_knots(sim, ee_start, q_start, traj):
+def cartesian_knots(sim, ee_start, q_start, traj, *, log=None):
     """Joint knots for `traj` from tool pose `ee_start` / joints `q_start`: straight lines with
     slerped orientation between consecutive poses, split into <= CART_STEP_M / CART_STEP_DEG steps,
     each IK'd from the previous (same re-solve as `plan_cartesian`). Returns (knots, segment
     lengths in m), or (None, None) if a step misses the IK tolerance or jumps a joint more than
-    MAX_KNOT_JUMP_DEG. Pure sim -- used by `move_cartesian`, and testable offline."""
+    MAX_KNOT_JUMP_DEG. Pure sim -- used by `move_cartesian`, and testable offline. `log`: called
+    with the refusal message instead of logging it as a warning."""
     from scipy.spatial.transform import Slerp
 
     scene, rb = sim
@@ -154,7 +155,7 @@ def cartesian_knots(sim, ee_start, q_start, traj):
                 or j4 > sim_mod.J4_GUARD_DEG
                 or j6 > sim_mod.J6_GUARD_DEG
             ):
-                logging.getLogger("sheppy_arm").warning(
+                (log or logging.getLogger("sheppy_arm").warning)(
                     f"  SheppyArm: waypoint {k + 1}/{len(traj)} step {i}/{n}: "
                     f"IK err {err * 100:.1f} cm, "
                     f"jump {jump:.1f} deg, J4 {j4:.1f}, J6 {j6:.1f} -- nothing sent."

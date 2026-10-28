@@ -13,7 +13,7 @@ action name in arm.py then fails the tests instead of being mirrored here. Test 
 
     state:        set_joints(q7), set_flange(pos, quat), set_gripper(pos), move_gripper_to(pos, s),
                   pause_publishing(), resume_publishing(), set_publish_rate(hz)
-    arbitration:  enforce_arbitration(), seize(owner_id)
+    arbitration:  enforce_arbitration(), seize(owner_id), engage_estop(status_delay_s=0.0)
     goals:        accept(name, bool), set_result(name, code), set_result_after_cancel(name, code),
                   hold_goals(seconds), finish_at(name, joints=None, flange=None), cancelled(name)
     streams:      set_controllers([(name, channels, available)]), publish_stream_status(open)
@@ -179,6 +179,7 @@ class FakeDriver(Node):
         self._estopped = False
         self._owner_id = ""
         self._generation = 0
+        self._halts = 0  # bumped by seize() and engage_estop(): running goals settle HALTED
         # Goal outcomes, by action name.
         self._accept = {}
         self._results = {}
@@ -289,8 +290,26 @@ class FakeDriver(Node):
         with self._lock:
             self._owner_id = owner_id
             self._generation += 1
+            self._halts += 1
         self._publish_control_status()
         return secrets.token_bytes(16)
+
+    def engage_estop(self, status_delay_s=0.0):
+        """The arm e-stops: running goals settle HALTED, generation unchanged.
+        /control_status shows estopped first, or `status_delay_s` after the goals halt (then the
+        result arrives first)."""
+
+        def show():
+            with self._lock:
+                self._estopped = True
+            self._publish_control_status()
+
+        if status_delay_s > 0.0:
+            threading.Timer(status_delay_s, show).start()
+        else:
+            show()
+        with self._lock:
+            self._halts += 1
 
     # -- test controls: goals -------------------------------------------------------------------
 
@@ -358,12 +377,10 @@ class FakeDriver(Node):
         return CancelResponse.ACCEPT
 
     def _execute(self, name, handle):
-        generation = self._generation
+        halts = self._halts
         deadline = time.monotonic() + self._hold_s
         while (
-            time.monotonic() < deadline
-            and not handle.is_cancel_requested
-            and self._generation == generation
+            time.monotonic() < deadline and not handle.is_cancel_requested and self._halts == halts
         ):
             time.sleep(GOAL_POLL_S)
         joints, flange = self._finish.get(name, (None, None))
@@ -375,7 +392,7 @@ class FakeDriver(Node):
             code = self._results_after_cancel.get(name, PREEMPTED)
             handle.canceled()
         else:
-            code = HALTED if self._generation != generation else self._results.get(name, SUCCESSFUL)
+            code = HALTED if self._halts != halts else self._results.get(name, SUCCESSFUL)
             if code == SUCCESSFUL:
                 handle.succeed()
             else:

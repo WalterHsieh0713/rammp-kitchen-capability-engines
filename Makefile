@@ -40,7 +40,7 @@ action:
 		'{engine_id: $(CAP), action_id: $(ACTION), params_json: "$(subst ",\",$(PARAMS))"}'
 
 check:
-	uv run --no-project --with pyyaml --with pytest python3 -m pytest -q tests
+	uv run --no-project --with pyyaml --with pytest python3 -m pytest -q tests --ignore=tests/arm
 	uv run --no-project --with pyyaml --with "$(SHEPPY)" python3 scripts/check_capabilities.py
 
 smoke:

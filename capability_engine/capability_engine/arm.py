@@ -55,7 +55,13 @@ from capability_engine.cornell_commands import (
     JointCommand,
     OpenGripperCommand,
 )
-from capability_engine.driver_state import ArmError, DriverState, NotInAction, StateTimeout
+from capability_engine.driver_state import (
+    ArmError,
+    DriverState,
+    EStopped,
+    NotInAction,
+    StateTimeout,
+)
 
 STATE_WAIT_S = 10.0  # how long the first arm call in an action waits for the driver's state
 STATE_STALE_S = 0.5  # /joint_states, /ee_state or /gripper_state older than this is an error
@@ -65,7 +71,10 @@ RESULT_MARGIN_S = 30.0  # a trajectory's result may come this long after its pla
 POLL_S = 0.01  # how often a running motion polls its result, its monitor and the action's cancel
 CANCEL_SETTLE_S = 0.4  # after cancelling a goal, how long to wait for the driver to settle it
 PREEMPTED = -6  # error_code of a goal settled by a cancel
-HALTED = -9  # error_code of a goal the driver stopped because another sender took control
+HALTED = -9  # error_code of a goal the driver halted: control taken, or an e-stop
+HALT_STATUS_WAIT_S = 0.2  # after a HALTED goal, how long to wait for /control_status to show
+# an e-stop (the result can arrive before the status), before taking it as control taken
+ACTION_ENDED_MESSAGE = "action ended"  # last_error of a motion the end of its action stopped
 
 # QoS as in SheppyArm (sheppy_arm.py@7bc328ae:190-201) and the driver's docs/interface.md.
 LATCHED = QoSProfile(
@@ -332,7 +341,7 @@ class ArmInterface:
     def _settle(self):
         """Cancel any running goal and close any open stream, waiting for each to settle.
         Called after the action has ended: uses the stored handles only, never _ensure_open()."""
-        goal = self._goal
+        goal, self._goal = self._goal, None
         if goal is not None:
             self._cancel_goal(*goal)
 
@@ -411,11 +420,46 @@ class ArmInterface:
         return False
 
     def _check_command(self):
-        """Raise (and log) the ArmError that forbids a command now: e-stop, control taken."""
+        """Raise (and log) ControlTaken or StreamClosed. An e-stop is not raised here: SheppyArm's
+        motions return False for it, through not_ready(), with SheppyArm's message."""
         try:
             self._driver.check_command()
+        except EStopped:
+            pass
         except ArmError as e:
             self._fail(type(e), str(e))
+
+    def _action(self, name):
+        """Action client `name`, opening the arm's entities if needed; NotInAction, never a
+        KeyError, once end_action() has destroyed them."""
+        self._ensure_open()
+        client = self._actions.get(name)
+        if client is None:
+            self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+        return client
+
+    def _wait_for_server(self, client, name, ctx):
+        """Wait up to STATE_WAIT_S for the action server, in POLL_S slices so a cancel of the
+        action (Cancelled) or its end (NotInAction) is not held up."""
+        deadline = time.monotonic() + STATE_WAIT_S
+        while not client.server_is_ready():
+            if ctx.cancelled():
+                ctx.checkpoint()  # raises the engine's Cancelled
+            if not self._in_action:
+                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+            if time.monotonic() > deadline:
+                self._fail(StateTimeout, f"no /{name} action server")
+            time.sleep(POLL_S)
+
+    def _estopped_within(self, timeout_s):
+        """Whether /control_status shows the arm e-stopped, waiting up to `timeout_s` for it."""
+
+        def estopped():
+            latest = self._latest.get("/control_status")
+            return latest is not None and latest[0].estopped
+
+        with self._cond:
+            return self._cond.wait_for(estopped, timeout_s)
 
     # -- state --------------------------------------------------------------------------------
 
@@ -562,7 +606,7 @@ class ArmInterface:
             return True
         t, q, qd = samples
         # fridge runs only: the wheelchair keep-out, every 2nd sample + end
-        if sim._KEEP_OUT is not None:
+        if sim.keep_out_enabled():
             rb = sim.make_sim()[1]
             for qi in list(q[::2]) + [q[-1]]:
                 msg = sim.keep_out_message(rb, qi)
@@ -579,11 +623,12 @@ class ArmInterface:
         did -- cut into <= CART_STEP_M / CART_STEP_DEG steps before IK, the same density as
         `plan_cartesian`, so the joint path is the one the sim gates checked."""
         self._checkpoint()
+        refusals = []
         knots, lengths = sheppy_arm.cartesian_knots(
-            sim.make_sim(), self.get_state()["ee_pos"], self.raw_joints(), traj
+            sim.make_sim(), self.get_state()["ee_pos"], self.raw_joints(), traj, log=refusals.append
         )
         if knots is None:
-            return False
+            return self._refuse(refusals[-1])
         return self.move_joints(
             knots, cart_lengths=lengths, impedance=impedance, speed_scale=speed_scale
         )
@@ -595,6 +640,7 @@ class ArmInterface:
         self._ctx.checkpoint()
 
     def _send(self, t, q, qd, impedance=None, monitor=None):
+        ctx = self._ctx  # end_action() clears self._ctx; an ended action fails in not_ready()
         self._check_command()
         why = self.not_ready()
         if why is not None:
@@ -630,16 +676,15 @@ class ArmInterface:
         token = self._driver.token
         if token is not None:
             g.token = list(token)
-        client = self._actions["execute_joint_trajectory"]
-        if not client.wait_for_server(timeout_sec=STATE_WAIT_S):
-            self._fail(StateTimeout, "no /execute_joint_trajectory action server")
+        client = self._action("execute_joint_trajectory")
+        self._wait_for_server(client, "execute_joint_trajectory", ctx)
         self._driver.begin_goal("execute_joint_trajectory")
         try:
-            return self._run_goal(client, g, t[-1], token, monitor)
+            return self._run_goal(client, g, t[-1], token, monitor, ctx)
         finally:
             self._driver.end_goal()
 
-    def _run_goal(self, client, g, duration, token, monitor):
+    def _run_goal(self, client, g, duration, token, monitor, ctx):
         """Send trajectory goal `g`, record last_path while it runs and wait for its result."""
         gh = self._wait(client.send_goal_async(g), GOAL_ACCEPT_S)
         if gh is None or not gh.accepted:
@@ -654,10 +699,10 @@ class ArmInterface:
         res = None
         try:
             t_end = time.monotonic() + duration + RESULT_MARGIN_S
-            while not rf.done() and time.monotonic() < t_end:
-                if self._ctx.cancelled():
+            while not rf.done() and time.monotonic() < t_end and self._in_action:
+                if ctx.cancelled():
                     self._cancel_goal(gh, rf)
-                    self._ctx.checkpoint()  # raises the engine's Cancelled
+                    ctx.checkpoint()  # raises the engine's Cancelled
                 if monitor is not None and not self.monitor_stopped and monitor():
                     self.monitor_stopped = True
                     gh.cancel_goal_async()  # the driver stops the arm, then settles PREEMPTED
@@ -670,14 +715,19 @@ class ArmInterface:
             raise
         finally:
             self._path_t0 = None
-            self._goal = None
+            if self._in_action:  # otherwise end_action()'s _settle() takes the goal and cancels it
+                self._goal = None
+        if not self._in_action:
+            return self._refuse(ACTION_ENDED_MESSAGE)
         if res is None:
             gh.cancel_goal_async()
             return self._refuse("  SheppyArm: no result in time -- goal cancelled")
         code = res.result.error_code
         if self.monitor_stopped and code == PREEMPTED:
             return True
-        if code == HALTED and token is not None:
+        # HALTED under our token: control taken, unless the driver e-stopped (an e-stop drops
+        # grants without a new generation), which is SheppyArm's plain failure below
+        if code == HALTED and token is not None and not self._estopped_within(HALT_STATUS_WAIT_S):
             self._driver.on_goal_halted()
             self._check_command()  # raises ControlTaken: another sender took the arm from us
         if code != 0:

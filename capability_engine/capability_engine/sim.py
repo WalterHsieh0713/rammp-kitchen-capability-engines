@@ -305,6 +305,11 @@ def continuous_ok(q_from, q_to):
     return bool(np.all(d <= MAX_CONTINUOUS_DELTA_DEG))
 
 
+def keep_out_enabled() -> bool:
+    """Whether a keep-out zone is set (set_keep_out): fridge runs only."""
+    return _KEEP_OUT is not None
+
+
 def keep_out_message(rb, q):
     """Why joints `q` are in the keep-out zone, or None.
 
