@@ -1,0 +1,99 @@
+# This capability's contract, as code: sheppy's `alternative` schema plus
+# RAMMP's `tier` (and `implements`, once a role contract exists). It is
+# transcribed into rammp-deployments/december_2026/sheppy-manifest.yaml.
+#
+# Keys under `container:` are the compose subset sheppy supports: image,
+# command, entrypoint, environment, env_file, network_mode, volumes, devices,
+# gpus, privileged, cap_add, cap_drop, ports, user, working_dir. Declare
+# hardware here, never in a README step. Do not set RMW_IMPLEMENTATION or
+# CYCLONEDDS_URI; rammp-base owns them.
+id: grab_container_real
+tier: experimental
+kind: docker
+container:
+  # :dev is mutable and overwritten on every merge to dev. A demo profile needs
+  # a release tag or digest; `tier: demo-ready` is rejected without one.
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/grab_container:dev
+  network_mode: host
+  ipc: host
+  # Runs the same node as the image's CMD, without the launch file. sheppy
+  # appends `--ros-args --params-file` to the command; with no command, those
+  # args replace the CMD and the node never starts. Run the node's executable
+  # (`ros2 run`), never `ros2 launch`, which rejects them.
+  command: ["ros2", "run", "grab_container", "grab_container_node"]
+  # The ring detector's weights (model_path); they are not in the image.
+  volumes:
+    - /home/jetson/oxo:/models:ro
+  # The ring detector's YOLO runs on the GPU (the mock has none and needs none).
+  gpus: all
+# Defaults for every value a deployment may change per robot or from the sheppy
+# TUI; a profile can override only keys listed here. Hosts, ports and file
+# paths go here too, never hard-coded in the node.
+params:
+  # false: every goal is a dry run (grab: detect and plan; park: report), whatever it asks.
+  # true only for attended runs, someone on the e-stop.
+  allow_execute: false
+  # The YOLO segmentation weights with the ring's `grabber` class (the volume above).
+  model_path: /models/best.pt
+  # Wrist camera; depth must be aligned to colour.
+  camera_ns: /wrist_camera
+  camera_frame: camera_color_optical_frame
+  # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
+  "arm.tool_z": 0.12
+  "arm.dt": 0.02
+  "arm.joint_speed": 0.85
+  "arm.cart_speed": 0.16
+  "arm.contact_joint_speed": 0.5
+  "arm.contact_cart_speed": 0.09
+  "arm.min_duration_s": 1.0
+  "arm.cart_step_m": 0.02
+  "arm.cart_step_deg": 5.0
+  "arm.rot_equiv_m": 0.15
+  "arm.max_knot_jump_deg": 20.0
+  "arm.path_tol_rad": 0.15
+  "arm.gripper_force": 0.5
+  "arm.gripper_speed": 0.5
+  "arm.frame": "arm_mount"
+  "arm.go_to_speed_scale": 0.3
+  "arm.go_to_timeout_s": 120.0
+  "arm.go_to_track_m": 0.01
+  "arm.go_to_track_deg": 2.0
+  "arm.max_ik_err": 0.02
+  "arm.max_step_jump_deg": 20.0
+  "arm.j6_guard_deg": 115.0
+  "arm.j4_guard_deg": 144.0
+  "arm.max_continuous_delta_deg": 170.0
+  "arm.keep_out_err": 9.0
+  "arm.ik_max_iterations": 200
+  "arm.clearance_query_m": 0.5
+  "arm.fingertip_open_rad": 0.0
+  "arm.finger_closed_rad": 0.7
+  "arm.state_wait_s": 10.0
+  "arm.state_stale_s": 0.5
+  "arm.diagnostics_stale_s": 3.0
+  "arm.goal_accept_s": 5.0
+  "arm.result_margin_s": 30.0
+  "arm.poll_s": 0.01
+  "arm.cancel_settle_s": 0.4
+  "arm.halt_status_wait_s": 0.2
+  "arm.planner_wait_s": 5.0
+  "arm.go_to_settle_s": 0.3
+  "arm.gripper_period_s": 0.02
+  "arm.gripper_moved": 0.002
+  "arm.gripper_judge_after_s": 0.5
+  "arm.gripper_still_s": 0.3
+  "arm.plan_timeout_s": 30.0
+  "arm.service_wait_s": 5.0
+  "arm.service_call_s": 10.0
+  "arm.stream_timeout_s": 0.1
+  "arm.publisher_match_s": 1.0
+  "arm.close_stream_wait_s": 1.0
+  "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
+  "arm.mock_urdf": ""
+publishes: [/grab_container/status]
+subscribes:
+  - /tf
+  - /tf_static
+  - /wrist_camera/color/image_raw
+  - /wrist_camera/color/camera_info
+  - /wrist_camera/aligned_depth_to_color/image_raw

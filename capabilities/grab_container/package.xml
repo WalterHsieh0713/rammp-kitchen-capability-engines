@@ -1,0 +1,24 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>grab_container</name>
+  <version>0.1.0</version>
+  <description>Grab the food container by its sleeve ring: detect, pre-grasp, grasp, close, raise</description>
+  <maintainer email="swapnil.pande98@gmail.com">Swapnil Pande</maintainer>
+  <license>Proprietary</license>
+
+  <exec_depend>capability_engine</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-scipy</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
