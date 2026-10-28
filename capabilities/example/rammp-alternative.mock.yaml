@@ -8,6 +8,7 @@ container:
   image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/example:dev
   network_mode: host
   ipc: host
+  # To give make_sim() a model, append "mock_urdf:=/path/to/robot.urdf" (arm.mock_urdf).
   command: ["ros2", "launch", "example", "example.launch.py", "mock:=true"]
 # No `params:` here: they would need `ros2 run`, and this fragment uses `ros2 launch` for mock:=true.
 publishes: [/example/status]

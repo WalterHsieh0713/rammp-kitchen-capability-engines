@@ -102,4 +102,5 @@ copy that table and the `arm.*` keys under `params:` in the real fragment into
 your capability. A test checks the example's fragment and table against
 `capability_engine/arm_params.py`. In mock runs (`mock:=true`) there is no
 driver, so no model: set `arm.mock_urdf` to the URDF file `make_sim()` should
-load (and `arm.mock_joints` for where the arm starts).
+load (and `arm.mock_joints` for where the arm starts). Launch files take it as
+`mock_urdf:=/path/robot.urdf`; native runs can also use `--ros-args -p arm.mock_urdf:=...`.

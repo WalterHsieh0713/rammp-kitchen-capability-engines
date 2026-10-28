@@ -53,8 +53,8 @@ PARAMS = [
     # sim: the IK and planning guards
     _param(sim, "MAX_IK_ERR", "IK position error above which a pose is unreachable (m)"),
     _param(sim, "MAX_STEP_JUMP_DEG", "Largest joint change of a planned step (deg)"),
-    _param(sim, "J6_GUARD_DEG", "Largest |J6| the sim accepts (deg)"),
-    _param(sim, "J4_GUARD_DEG", "Largest |J4| the sim accepts (deg)"),
+    _param(sim, "J6_GUARD_DEG", "Largest absolute J6 the sim accepts (deg)"),
+    _param(sim, "J4_GUARD_DEG", "Largest absolute J4 the sim accepts (deg)"),
     _param(sim, "MAX_CONTINUOUS_DELTA_DEG", "Largest short-way step of a free joint (deg)"),
     _param(sim, "KEEP_OUT_ERR", "IK error reported for a keep-out solution (m)"),
     _param(sim, "IK_MAX_ITERATIONS", "PyBullet IK iterations per solve"),

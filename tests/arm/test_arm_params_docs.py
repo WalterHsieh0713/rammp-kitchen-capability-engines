@@ -25,8 +25,13 @@ def test_mock_fragment_has_no_params():
     assert "params" not in yaml.safe_load((EXAMPLE / "rammp-alternative.mock.yaml").read_text())
 
 
-def test_interface_md_documents_every_arm_param_with_its_default():
+def test_interface_md_documents_every_arm_param_with_its_default_and_meaning():
     text = (EXAMPLE / "docs" / "interface.md").read_text()
-    rows = re.findall(r"^\|\s*`(arm\.\w+)`\s*\|\s*`([^`]*)`\s*\|", text, re.M)
-    assert {name: json.loads(default) for name, default in rows} == EXPECTED
-    assert len(rows) == len(EXPECTED)
+    lines = [ln for ln in text.splitlines() if re.match(r"\|\s*`arm\.", ln)]
+    rows = {}
+    for line in lines:
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        assert len(cells) == 3, f"expected 3 cells (an unescaped | in the text?): {line}"
+        rows[cells[0].strip("`")] = (json.loads(cells[1].strip("`")), cells[2])
+    assert rows == {f"arm.{prm.name}": (prm.default, prm.description) for prm in PARAMS}
+    assert len(lines) == len(PARAMS)
