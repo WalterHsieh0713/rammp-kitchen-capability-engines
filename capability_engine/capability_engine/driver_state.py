@@ -17,7 +17,7 @@ class ArmError(Exception):
 
 
 class NotInAction(ArmError):
-    """A streaming call was made outside a stream(...) block."""
+    """An arm call was made outside an action, or a streaming call outside a stream(...) block."""
 
 
 class ModeConflict(ArmError):
