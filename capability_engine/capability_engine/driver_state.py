@@ -63,16 +63,16 @@ class DriverState:
             return self._token
 
     def set_token(self, token):
+        """Start an action with this token (or None); forgets any earlier takeover."""
         with self._lock:
             self._token = token
+            self._control_taken_by = None
 
     def begin_goal(self, name):
         self._begin("goal", name)
 
     def begin_stream(self, controller):
         self._begin("stream", controller)
-        with self._lock:
-            self._stream_closed = False
 
     def end_goal(self):
         self._end()
@@ -87,10 +87,12 @@ class DriverState:
                     f"cannot start {mode} {name!r}: {self._mode} {self._running!r} is running"
                 )
             self._mode, self._running = mode, name
+            self._stream_closed = False
 
     def _end(self):
         with self._lock:
             self._mode, self._running = "idle", ""
+            self._stream_closed = False
 
     def on_control_status(self, estopped, arbitration_enabled, owned, owner_id, generation):
         with self._lock:
@@ -100,6 +102,13 @@ class DriverState:
             if changed and self._token is not None:
                 self._token = None
                 self._control_taken_by = owner_id
+
+    def on_goal_halted(self):
+        """A goal settled -9 HALTED: while holding the token, that means control was taken."""
+        with self._lock:
+            if self._token is not None:
+                self._token = None
+                self._control_taken_by = self._status[3] if self._status else ""
 
     def on_stream_status(self, open):  # noqa: A002 (the driver's field name)
         with self._lock:

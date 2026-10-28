@@ -124,3 +124,37 @@ def test_not_ready_enforced_with_token():
     assert ds.not_ready("me") is None
     status(ds, enforced=True, owned=True, owner="x")
     assert ds.not_ready("me") == "the arm is owned by 'x'"
+
+
+def test_set_token_clears_control_taken():
+    ds = DriverState()
+    ds.set_token(TOKEN)
+    status(ds, generation=1)
+    status(ds, generation=2, owner="teleop")
+    ds.set_token(b"n" * 16)
+    ds.check_command()
+
+
+def test_stream_closed_does_not_outlive_stream():
+    ds = DriverState()
+    ds.begin_stream("ee_twist")
+    ds.on_stream_status(False)
+    ds.end_stream()
+    ds.check_command()
+
+
+def test_goal_halted_with_token_is_control_taken():
+    ds = DriverState()
+    ds.set_token(TOKEN)
+    status(ds, owner="teleop")
+    ds.on_goal_halted()
+    with pytest.raises(ControlTaken, match="teleop"):
+        ds.check_command()
+    assert ds.token is None
+
+
+def test_goal_halted_without_token_does_nothing():
+    ds = DriverState()
+    status(ds, owner="teleop")
+    ds.on_goal_halted()
+    ds.check_command()
