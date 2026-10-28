@@ -127,7 +127,7 @@ def test_end_action_while_state_streams_in(arm_env):
         arm.end_action()
 
 
-def test_get_state_returns_stale_values_like_sheppy_arm(arm_env):
+def test_get_state_returns_stale_values_like_rammp_arm(arm_env):
     arm, _, fake = arm_env
     arm.begin_action(FakeCtx(), None)
     arm.get_state()
@@ -137,14 +137,14 @@ def test_get_state_returns_stale_values_like_sheppy_arm(arm_env):
     assert arm.raw_joints().shape == (7,)
 
 
-def test_state_timeout_keeps_sheppy_arms_message(arm_env, monkeypatch):
+def test_state_timeout_keeps_rammp_arms_message(arm_env, monkeypatch):
     arm, _, fake = arm_env
     monkeypatch.setattr(arm_module, "STATE_WAIT_S", 0.2)
     fake.pause_publishing()
     arm.begin_action(FakeCtx(), None)
     with pytest.raises(StateTimeout, match=re.escape(SHEPPY_NO_STATE)) as raised:
         arm.get_state()
-    assert isinstance(raised.value, RuntimeError)  # what SheppyArm's callers catch
+    assert isinstance(raised.value, RuntimeError)  # what RammpArm's callers catch
 
 
 def test_end_action_between_check_and_open(arm_env, monkeypatch):

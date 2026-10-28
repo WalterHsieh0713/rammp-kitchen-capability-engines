@@ -4,10 +4,10 @@ import time
 import numpy as np
 import pytest
 from fake_driver import FakeCtx
+from rammp_arm import SENDER_ID, TOOL_Z
 from rammp_arm_interfaces.action import GoToEEPose
 from rammp_arm_interfaces.msg import ImpedanceGains
 from rclpy.action.client import ClientGoalHandle
-from sheppy_arm import SENDER_ID, TOOL_Z
 
 from capability_engine import arm as arm_module
 from capability_engine.arm import HOLD_LEVEL, IMPEDANCE, LATEST_WINS, GoalFeedback

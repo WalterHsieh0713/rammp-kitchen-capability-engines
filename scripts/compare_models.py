@@ -17,7 +17,7 @@ from pathlib import Path
 
 import numpy as np
 import pybullet as p
-import sheppy_arm
+import rammp_arm
 
 from capability_engine import sim
 from capability_engine.sim import Pose
@@ -96,7 +96,7 @@ def run_model(urdf, base_pose, ee, ik_cases, knot_cases, qs, mount=None):
         start = np.concatenate([pos, quat])
         traj = [xf(pp, qq) for pp, qq in c["traj"]]
         res["knots"].append(
-            sheppy_arm.cartesian_knots((scene, rb), start, c["q_start"], traj, log=lambda m: None)
+            rammp_arm.cartesian_knots((scene, rb), start, c["q_start"], traj, log=lambda m: None)
         )
     for q in qs:
         res["tool"].append(sim.tool_pose(scene, rb, q))

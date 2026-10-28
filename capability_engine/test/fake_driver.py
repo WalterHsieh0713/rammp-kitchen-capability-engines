@@ -36,6 +36,7 @@ from pathlib import Path
 
 from builtin_interfaces.msg import Duration
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus
+from rammp_arm import ERRORS, JOINTS
 from rammp_arm_interfaces.action import (
     ExecuteJointTrajectory,
     GoToEEPose,
@@ -68,7 +69,6 @@ from rclpy.qos import (
     qos_profile_sensor_data,
 )
 from sensor_msgs.msg import JointState
-from sheppy_arm import ERRORS, JOINTS
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 

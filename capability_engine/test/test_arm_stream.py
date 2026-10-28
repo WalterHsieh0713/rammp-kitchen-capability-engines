@@ -4,11 +4,11 @@ import time
 import numpy as np
 import pytest
 from fake_driver import FakeCtx, counts
+from rammp_arm import JOINTS
 from rammp_arm_interfaces.msg import ImpedanceGains
 from rammp_curobo_interfaces.action import PlanToPose
 from rammp_curobo_interfaces.srv import SetWorld
 from rclpy.callback_groups import ReentrantCallbackGroup
-from sheppy_arm import JOINTS
 
 from capability_engine import arm as arm_module
 from capability_engine.arm import HOLD_LEVEL, ArmInterface, Controller, Plan

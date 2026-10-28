@@ -21,8 +21,8 @@ import signal
 import threading
 from dataclasses import dataclass, field
 
+import rammp_arm
 import rclpy
-import sheppy_arm
 from rammp_orchestrator_interfaces.action import ExecuteAction
 from rammp_orchestrator_interfaces.msg import (
     ActionAvailability,
@@ -221,7 +221,7 @@ class CapabilityEngine(Node):
         are module constants, so the values are process-wide: the last engine made sets them."""
         for prm in PARAMS:
             # The design: under the engine, the sender id on goals is the capability's.
-            default = engine_id if prm.target == (sheppy_arm, "SENDER_ID") else prm.default
+            default = engine_id if prm.target == (rammp_arm, "SENDER_ID") else prm.default
             value = self.declare_parameter(
                 f"arm.{prm.name}", default, ParameterDescriptor(description=prm.description)
             ).value

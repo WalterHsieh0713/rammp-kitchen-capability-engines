@@ -20,11 +20,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
-import sheppy_arm
+import rammp_arm
 from builtin_interfaces.msg import Duration
 from control_msgs.msg import JointTolerance
 from diagnostic_msgs.msg import DiagnosticArray
 from geometry_msgs.msg import PoseStamped
+from rammp_arm import CONTINUOUS, ERRORS, JOINTS, _wrap
 from rammp_arm_interfaces.action import (
     ExecuteJointTrajectory,
     GoToEEPose,
@@ -59,7 +60,6 @@ from rclpy.qos import (
 )
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import JointState
-from sheppy_arm import CONTINUOUS, ERRORS, JOINTS, _wrap
 from std_msgs.msg import String
 from trajectory_msgs.msg import JointTrajectoryPoint
 
@@ -130,7 +130,7 @@ GAIN_PROFILES = {
 }
 GAIN_KEYS = ("kq", "zeta", "torque_limit")  # `gains` as a dict: custom joint impedance
 
-# QoS as in SheppyArm (sheppy_arm.py@7bc328ae:190-201) and the driver's docs/interface.md.
+# QoS as in RammpArm (rammp_arm.py@7bc328ae:190-201) and the driver's docs/interface.md.
 LATCHED = QoSProfile(
     depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL
 )
@@ -165,7 +165,7 @@ SERVICES = {
     "revoke_control": (RevokeControl, "/revoke_control"),
     "set_world": (SetWorld, "/rammp_curobo/set_world"),
 }
-# The first arm call in an action waits for these (SheppyArm's constructor did).
+# The first arm call in an action waits for these (RammpArm's constructor did).
 MOTION_STATE = ("/joint_states", "/ee_state", "/gripper_state")
 NOT_IN_ACTION_MESSAGE = "the arm is only available inside an action"
 NO_STATE_MESSAGE = (
@@ -247,7 +247,7 @@ class Diagnostics:
 class TrajectoryResult:
     """execute_joint_trajectory's result, as the driver settled the goal."""
 
-    error_code: int  # 0 SUCCESSFUL, or one of sheppy_arm.ERRORS
+    error_code: int  # 0 SUCCESSFUL, or one of rammp_arm.ERRORS
     error_string: str
     final_error: np.ndarray  # joint position error (reference - actual) at the end, rad
 
@@ -296,7 +296,7 @@ def _goal_feedback(m):
 def _impedance_gains(gains) -> ImpedanceGains:
     """`gains` as the driver's ImpedanceGains: None (the message default), a profile name in
     GAIN_PROFILES, or a dict {"kq": 7 floats, "zeta": float, "torque_limit": 7 floats} (custom
-    joint impedance, SheppyArm's IMPEDANCE without path_tol). ArmError for anything else."""
+    joint impedance, RammpArm's IMPEDANCE without path_tol). ArmError for anything else."""
     if gains is None:
         return ImpedanceGains()
     if isinstance(gains, str) and gains in GAIN_PROFILES:
@@ -438,7 +438,7 @@ def _ee_state(m):
 
 def _tool_position(ee):
     """The tool frame's position: the flange + TOOL_Z along the flange z."""
-    return ee.position + R.from_quat(ee.orientation).apply([0.0, 0.0, sheppy_arm.TOOL_Z])
+    return ee.position + R.from_quat(ee.orientation).apply([0.0, 0.0, rammp_arm.TOOL_Z])
 
 
 def _gripper_state(m):
@@ -540,7 +540,7 @@ class Stream:
 
 
 class ArmInterface:
-    """`self.arm`: SheppyArm's API and the driver's, side by side, on the engine's node."""
+    """`self.arm`: RammpArm's API and the driver's, side by side, on the engine's node."""
 
     def __init__(self, node, callback_group, *, standalone: bool = False, mock: bool = False):
         self._node = node
@@ -685,14 +685,14 @@ class ArmInterface:
         raise error(message)
 
     def _refuse(self, message):
-        """SheppyArm's failure path: log `message` (its print), keep it in last_error, False."""
+        """RammpArm's failure path: log `message` (its print), keep it in last_error, False."""
         self.last_error = message
         self._node.get_logger().error(message)
         return False
 
     def _check_command(self):
-        """Raise (and log) ControlTaken or StreamClosed. An e-stop is not raised here: SheppyArm's
-        motions return False for it, through not_ready(), with SheppyArm's message."""
+        """Raise (and log) ControlTaken or StreamClosed. An e-stop is not raised here: RammpArm's
+        motions return False for it, through not_ready(), with RammpArm's message."""
         try:
             self._driver.check_command()
         except EStopped:
@@ -769,8 +769,8 @@ class ArmInterface:
                 pos, quat = np.zeros(3), R.identity().as_quat()
             else:
                 pos, quat = sim.tool_pose(*model, self._mock_q)
-            flange = pos - R.from_quat(quat).apply([0.0, 0.0, sheppy_arm.TOOL_Z])
-            return EeState(sheppy_arm.FRAME, flange, quat, *(np.zeros(3) for _ in range(4)))
+            flange = pos - R.from_quat(quat).apply([0.0, 0.0, rammp_arm.TOOL_Z])
+            return EeState(rammp_arm.FRAME, flange, quat, *(np.zeros(3) for _ in range(4)))
         if topic == "/gripper_state":
             return GripperState(self._mock_gripper, 0.0, 0.0, True)
         if topic == "/control_status":
@@ -851,8 +851,8 @@ class ArmInterface:
         return self._read("/diagnostics", DIAGNOSTICS_STALE_S)
 
     def get_state(self) -> dict:
-        """SheppyArm's state dict: joints wrapped to +-pi, `ee_pos` the tool frame (flange +
-        TOOL_Z along the flange z) as [x, y, z, qx, qy, qz, qw]. Like SheppyArm, the latest
+        """RammpArm's state dict: joints wrapped to +-pi, `ee_pos` the tool frame (flange +
+        TOOL_Z along the flange z) as [x, y, z, qx, qy, qz, qw]. Like RammpArm, the latest
         values however old: only the driver-API reads (joint_states(), ...) refuse stale state."""
         js, ee, grip = (self._read(topic) for topic in MOTION_STATE)
         tool = _tool_position(ee)
@@ -876,7 +876,7 @@ class ArmInterface:
             return None
         self._ensure_open()
         self._wait_for("/control_status")
-        return self._driver.not_ready(sheppy_arm.SENDER_ID)
+        return self._driver.not_ready(rammp_arm.SENDER_ID)
 
     def robot_description(self) -> str:
         """The driver's URDF, from /arm/robot_description (latched), through a one-shot
@@ -910,7 +910,7 @@ class ArmInterface:
             self._node.destroy_subscription(sub)
         return received["urdf"]
 
-    # -- motions (SheppyArm's, sheppy_arm.py@7bc328ae:260-458) -------------------------------
+    # -- motions (RammpArm's, rammp_arm.py@7bc328ae:260-458) -------------------------------
 
     def execute_command(self, cmd):
         if isinstance(cmd, JointCommand):
@@ -921,7 +921,7 @@ class ArmInterface:
             return self.gripper(0.0)
         if isinstance(cmd, CloseGripperCommand):
             return self.gripper(1.0)
-        raise TypeError(f"SheppyArm: unsupported command {type(cmd).__name__}")
+        raise TypeError(f"RammpArm: unsupported command {type(cmd).__name__}")
 
     def move_joints(self, knots, cart_lengths=None, speed_scale=1.0, impedance=None, monitor=None):
         """Through joint `knots` (wrapped or not) from the measured joints. `cart_lengths`: the
@@ -931,7 +931,7 @@ class ArmInterface:
         while the trajectory runs; when it returns True the goal is cancelled (the driver stops the
         arm and holds), `monitor_stopped` is set and the call returns True."""
         self._checkpoint()
-        samples = sheppy_arm.joint_trajectory(self.raw_joints(), knots, cart_lengths, speed_scale)
+        samples = rammp_arm.joint_trajectory(self.raw_joints(), knots, cart_lengths, speed_scale)
         if samples is None:
             return True
         t, q, qd = samples
@@ -942,7 +942,7 @@ class ArmInterface:
                 msg = sim.keep_out_message(rb, qi)
                 if msg is not None:
                     return self._refuse(
-                        f"  SheppyArm: the trajectory enters the keep-out zone ({msg}) -- "
+                        f"  RammpArm: the trajectory enters the keep-out zone ({msg}) -- "
                         "nothing sent."
                     )
         return self._send(t, q, qd, impedance, monitor)
@@ -957,7 +957,7 @@ class ArmInterface:
         if self._mock and self._mock_sim() is None:  # no model to solve the path on: joints stay
             return self._mock_sent("move_cartesian")
         refusals = []
-        knots, lengths = sheppy_arm.cartesian_knots(
+        knots, lengths = rammp_arm.cartesian_knots(
             sim.make_sim(), self.get_state()["ee_pos"], self.raw_joints(), traj, log=refusals.append
         )
         if knots is None:
@@ -966,7 +966,7 @@ class ArmInterface:
             knots, cart_lengths=lengths, impedance=impedance, speed_scale=speed_scale
         )
 
-    # -- planned moves (SheppyArm's go_to_*, sheppy_arm.py@7bc328ae:317-378) -------------------
+    # -- planned moves (RammpArm's go_to_*, rammp_arm.py@7bc328ae:317-378) -------------------
 
     def go_to_ee_pose(
         self,
@@ -996,7 +996,7 @@ class ArmInterface:
             return self._mock_sent(label, q)
         g = GoToEEPose.Goal()
         g.target = PoseStamped()
-        g.target.header.frame_id = sheppy_arm.FRAME
+        g.target.header.frame_id = rammp_arm.FRAME
         g.target.header.stamp = self._node.get_clock().now().to_msg()
         p = g.target.pose.position
         p.x, p.y, p.z = map(float, pos[:3])
@@ -1008,7 +1008,7 @@ class ArmInterface:
         tool = _tool_position(self._read("/ee_state"))
         e = float(np.linalg.norm(tool - np.asarray(pos[:3], float)))
         message = f"  {label}: tool {e * 100:.1f} cm from the goal"
-        if e > sheppy_arm.GO_TO_TRACK_M:
+        if e > rammp_arm.GO_TO_TRACK_M:
             return self._refuse(message)
         self._node.get_logger().info(message)
         return True
@@ -1039,7 +1039,7 @@ class ArmInterface:
         d[CONTINUOUS] = (d[CONTINUOUS] + np.pi) % (2 * np.pi) - np.pi
         e = float(np.degrees(np.max(np.abs(d))))
         message = f"  {label}: joints within {e:.1f} deg of the goal"
-        if e > sheppy_arm.GO_TO_TRACK_DEG:
+        if e > rammp_arm.GO_TO_TRACK_DEG:
             return self._refuse(message)
         self._node.get_logger().info(message)
         return True
@@ -1065,28 +1065,28 @@ class ArmInterface:
         self._check_command()
         why = self.not_ready()
         if why is not None:
-            return self._refuse(f"  SheppyArm: {label}: {why} -- nothing sent.")
+            return self._refuse(f"  RammpArm: {label}: {why} -- nothing sent.")
         client = self._action(name)
         if not self._wait_for_server(client, ctx, PLANNER_WAIT_S):
             return self._refuse(
-                f"  SheppyArm: {label}: no action server (the go_to_* actions need the cuRobo "
+                f"  RammpArm: {label}: no action server (the go_to_* actions need the cuRobo "
                 "planner: sheppy profile real-arm-camera-planner) -- nothing sent."
             )
-        g.speed_scale = float(sheppy_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
+        g.speed_scale = float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
         g.control_mode = control_mode
         self._node.get_logger().info(
             f"  {label}: cuRobo plans the path (not previewed), run at {g.speed_scale:g} x its "
             "speed ..."
         )
-        timeout_s = sheppy_arm.GO_TO_TIMEOUT_S
+        timeout_s = rammp_arm.GO_TO_TIMEOUT_S
         res = self._run_goal(
             name,
             client,
             g,
             timeout_s,
             ctx,
-            f"  SheppyArm: {label}: goal REJECTED -- nothing moved",
-            f"  SheppyArm: {label}: no result in {timeout_s:.0f} s -- goal cancelled",
+            f"  RammpArm: {label}: goal REJECTED -- nothing moved",
+            f"  RammpArm: {label}: no result in {timeout_s:.0f} s -- goal cancelled",
             feedback=feedback,
         )
         if res is None:
@@ -1094,7 +1094,7 @@ class ArmInterface:
         code = res.error_code
         if code != 0:
             return self._refuse(
-                f"  SheppyArm: {label} ended {ERRORS.get(code, code)} {res.error_string}"
+                f"  RammpArm: {label} ended {ERRORS.get(code, code)} {res.error_string}"
             )
         time.sleep(GO_TO_SETTLE_S)  # let /ee_state and /joint_states catch up with the move's end
         return True
@@ -1113,7 +1113,7 @@ class ArmInterface:
         self._check_command()
         why = self.not_ready()
         if why is not None:
-            return self._refuse(f"  SheppyArm: {why} -- nothing sent.")
+            return self._refuse(f"  RammpArm: {why} -- nothing sent.")
         g = ExecuteJointTrajectory.Goal()
         g.trajectory.joint_names = JOINTS
         for ti, qi, qdi in zip(t, q, qd, strict=False):
@@ -1121,7 +1121,7 @@ class ArmInterface:
             pt.positions, pt.velocities = qi.tolist(), qdi.tolist()
             pt.time_from_start = _duration(ti)
             g.trajectory.points.append(pt)
-        path_tol = impedance["path_tol"] if impedance else sheppy_arm.PATH_TOL_RAD
+        path_tol = impedance["path_tol"] if impedance else rammp_arm.PATH_TOL_RAD
         g.path_tolerance = _tolerances(JOINTS, path_tol)
         g.control_mode = POSITION
         if impedance:
@@ -1137,8 +1137,8 @@ class ArmInterface:
             g,
             t[-1] + RESULT_MARGIN_S,
             ctx,
-            "  SheppyArm: trajectory goal REJECTED",
-            "  SheppyArm: no result in time -- goal cancelled",
+            "  RammpArm: trajectory goal REJECTED",
+            "  RammpArm: no result in time -- goal cancelled",
             monitor=monitor,
             trajectory=True,
         )
@@ -1149,12 +1149,12 @@ class ArmInterface:
             return True
         if code != 0:
             self._refuse(
-                f"  SheppyArm: trajectory ended {ERRORS.get(code, code)} {res.error_string}"
+                f"  RammpArm: trajectory ended {ERRORS.get(code, code)} {res.error_string}"
             )
             fe = list(res.final_error.positions)
             if fe:
                 self._node.get_logger().error(
-                    "  SheppyArm: final joint error (ref - actual) deg J1-J7 "
+                    "  RammpArm: final joint error (ref - actual) deg J1-J7 "
                     f"{np.round(np.degrees(fe), 1)}"
                 )
         return code == 0
@@ -1180,7 +1180,7 @@ class ArmInterface:
         (`timed_out`; the goal is cancelled) or its action ended. `monitor`: polled while the goal
         runs; True cancels the goal and sets monitor_stopped. `feedback`: called with each
         GoalFeedback, on the executor (it must not block). `trajectory`: record last_path."""
-        g.sender_id = sheppy_arm.SENDER_ID
+        g.sender_id = rammp_arm.SENDER_ID
         token = self._driver.token
         if token is not None:
             g.token = list(token)
@@ -1256,7 +1256,7 @@ class ArmInterface:
             self._cancel(gh)
             self._wait(rf, CANCEL_SETTLE_S)
             if isinstance(e, KeyboardInterrupt):
-                self._node.get_logger().warning("  SheppyArm: Ctrl-C -- goal cancelled")
+                self._node.get_logger().warning("  RammpArm: Ctrl-C -- goal cancelled")
             raise
         finally:
             self._path_t0 = None
@@ -1316,9 +1316,9 @@ class ArmInterface:
         self._check_command()
         m = GripperSetpoint()
         m.position = float(position)
-        m.speed = float(sheppy_arm.GRIPPER_SPEED if speed is None else speed)
+        m.speed = float(rammp_arm.GRIPPER_SPEED if speed is None else speed)
         # a current ceiling: lower = looser hold
-        m.force = float(sheppy_arm.GRIPPER_FORCE if force is None else force)
+        m.force = float(rammp_arm.GRIPPER_FORCE if force is None else force)
         token = self._driver.token
         if token is not None:
             m.token = list(token)

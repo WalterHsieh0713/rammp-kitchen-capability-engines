@@ -1,6 +1,6 @@
 """The example's real fragment and interface.md list exactly arm_params.PARAMS, with its defaults.
 
-Lives in tests/arm because arm_params imports sheppy_arm (numpy, pybullet), which the plain-python
+Lives in tests/arm because arm_params imports rammp_arm (numpy, pybullet), which the plain-python
 `checks` job lacks.
 """
 
@@ -18,7 +18,7 @@ EXPECTED = {f"arm.{prm.name}": prm.default for prm in PARAMS}
 # fragment leaves it out (a copied fragment would otherwise send every capability's goals as
 # "microwave") and interface.md names that default in words.
 SENDER_ID = "arm.sender_id"
-SENDER_ID_DEFAULT_DOC = 'the engine id (SheppyArm standalone: `"microwave"`)'
+SENDER_ID_DEFAULT_DOC = 'the engine id (RammpArm standalone: `"microwave"`)'
 
 
 def test_real_fragment_lists_every_arm_param_with_its_default():

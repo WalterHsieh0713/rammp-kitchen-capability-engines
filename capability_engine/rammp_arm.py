@@ -1,7 +1,7 @@
-"""SheppyArm's constants and pure path helpers: Cartesian paths to joint knots, and their timing.
+"""RammpArm's constants and pure path helpers: Cartesian paths to joint knots, and their timing.
 
-Copied from feeding-deployment microwave-wip@7bc328ae microwave/sheppy_arm.py. Free of rclpy; the
-`SheppyArm` class that drives the arm lives below the helpers and imports ROS lazily.
+Copied from feeding-deployment microwave-wip@7bc328ae microwave/rammp_arm.py. Free of rclpy; the
+`RammpArm` class that drives the arm lives below the helpers and imports ROS lazily.
 """
 
 import logging
@@ -149,8 +149,8 @@ def cartesian_knots(sim, ee_start, q_start, traj, *, log=None):
                 or j4 > sim_mod.J4_GUARD_DEG
                 or j6 > sim_mod.J6_GUARD_DEG
             ):
-                (log or logging.getLogger("sheppy_arm").warning)(
-                    f"  SheppyArm: waypoint {k + 1}/{len(traj)} step {i}/{n}: "
+                (log or logging.getLogger("rammp_arm").warning)(
+                    f"  RammpArm: waypoint {k + 1}/{len(traj)} step {i}/{n}: "
                     f"IK err {err * 100:.1f} cm, "
                     f"jump {jump:.1f} deg, J4 {j4:.1f}, J6 {j6:.1f} -- nothing sent."
                 )
@@ -201,13 +201,13 @@ class _StandaloneCtx:
         return False
 
 
-class SheppyArm:
-    """SheppyArm for bench scripts: self.arm's ArmInterface on its own node, spun by its own
+class RammpArm:
+    """RammpArm for bench scripts: self.arm's ArmInterface on its own node, spun by its own
     MultiThreadedExecutor thread, always in an action until close(). No control token: under
     enforced arbitration the driver refuses its commands. Every attribute is the ArmInterface's
     (get_state(), move_joints(), last_path, monitor_stopped, ...)."""
 
-    def __init__(self, node_name="microwave_sheppy_arm"):
+    def __init__(self, node_name="microwave_rammp_arm"):
         import rclpy
         from rclpy.callback_groups import ReentrantCallbackGroup
         from rclpy.executors import MultiThreadedExecutor
@@ -228,7 +228,7 @@ class SheppyArm:
         try:
             if self._owns_model:  # refused when the sim was built from a URDF path
                 sim_mod.set_model_provider(self._arm.robot_description)
-            # As SheppyArm's constructor: wait for the arm's state, then the trajectory server
+            # As RammpArm's constructor: wait for the arm's state, then the trajectory server
             # (polled in POLL_S slices by the arm's own wait).
             self._arm.get_state()
             client = self._arm._action("execute_joint_trajectory")

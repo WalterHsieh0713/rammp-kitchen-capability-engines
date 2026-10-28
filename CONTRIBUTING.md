@@ -72,7 +72,7 @@ as the students' `SheppyArm` (`get_state`, `move_joints`, `move_cartesian`,
 they are sent. Use it inside `execute()`: the arm's ROS resources exist from the
 first arm call to the end of that `execute()`.
 
-**What a motion can raise.** `SheppyArm`'s methods return `False` for a refused
+**What a motion can raise.** `RammpArm`'s methods return `False` for a refused
 or failed motion, an e-stop included, as they always did. On top of that, any
 motion can raise:
 
@@ -100,11 +100,11 @@ the driver's own model. These rules keep your checks and the arm in agreement:
 - If you checked joints, send joints (`move_joints`). If you send poses
   (`move_cartesian`), check them with `cartesian_knots` on the shared sim, not
   with your own IK: a different solver may land on different joints.
-- Look poses up in `sheppy_arm.FRAME`, not a hard-coded frame. `arm_mount` and
+- Look poses up in `rammp_arm.FRAME`, not a hard-coded frame. `arm_mount` and
   `arm_base_link` agree on dojo and are 30 degrees apart on flatbot and gen_1_5.
 - Settable values are set through functions, not by assigning to a re-export:
   turn the keep-out on with `set_keep_out(fn)`. Speeds such as
-  `sheppy_arm.CART_SPEED *= s` are fine.
+  `rammp_arm.CART_SPEED *= s` are fine.
 
 **Control comes from the orchestrator.** It grants the arm when it starts your
 action. Never call `/acquire_control` or `/release_control`; `self.arm` does not
@@ -125,6 +125,6 @@ driver, so no model: set `arm.mock_urdf` to the URDF file `make_sim()` should
 load (and `arm.mock_joints` for where the arm starts). Launch files take it as
 `mock_urdf:=/path/robot.urdf`; native runs can also use `--ros-args -p arm.mock_urdf:=...`.
 Two values are deliberately not in the fragment: `arm.sender_id` defaults to the
-engine id, and `sheppy_arm.IMPEDANCE` is the one `SheppyArm` value that is not an
+engine id, and `rammp_arm.IMPEDANCE` is the one `RammpArm` value that is not an
 `arm.*` parameter at all, because it is only used when a caller passes it
 (`move_joints(..., impedance=IMPEDANCE)`).

@@ -2,7 +2,7 @@
 
 Vendored from feeding-deployment microwave-wip@7bc328ae
 src/feeding_deployment/control/robot_controller/command_interface.py, so `feeding_deployment` is
-not a dependency. Only the four commands SheppyArm executes.
+not a dependency. Only the four commands RammpArm executes.
 """
 
 from dataclasses import dataclass

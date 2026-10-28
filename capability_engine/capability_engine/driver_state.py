@@ -42,12 +42,12 @@ class NoToken(ArmError):
 
 
 class StateTimeout(ArmError, RuntimeError):
-    """The driver's state did not arrive in time (a RuntimeError, as SheppyArm raised)."""
+    """The driver's state did not arrive in time (a RuntimeError, as RammpArm raised)."""
 
 
 class DriverState:
     def __init__(self, *, standalone: bool = False):
-        self._standalone = standalone  # True: SheppyArm's wording when no token is held
+        self._standalone = standalone  # True: RammpArm's wording when no token is held
         self._lock = threading.Lock()
         self._mode = "idle"  # "idle", "goal" or "stream"
         self._running = ""  # name of the goal or controller of the stream

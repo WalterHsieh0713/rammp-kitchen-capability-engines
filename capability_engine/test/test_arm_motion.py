@@ -6,9 +6,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 from fake_driver import FakeCtx, counts
+from rammp_arm import TOOL_Z
 from rammp_arm_interfaces.msg import ImpedanceGains
 from scipy.spatial.transform import Rotation as R
-from sheppy_arm import TOOL_Z
 
 from capability_engine import sim
 from capability_engine.cornell_commands import (
@@ -224,7 +224,7 @@ def test_estop_mid_goal_with_token_returns_false(arm_env, status_delay_s):
     fake.hold_goals(HOLD_S)
     arm.begin_action(FakeCtx(), b"\x01" * 16)
     threading.Timer(SEIZE_AFTER_S, fake.engage_estop, args=(status_delay_s,)).start()
-    assert arm.move_joints([[0.3] * 7]) is False  # SheppyArm's failure, not ControlTaken
+    assert arm.move_joints([[0.3] * 7]) is False  # RammpArm's failure, not ControlTaken
     assert "trajectory ended HALTED" in fake_logs(arm)
     assert arm._driver.token == b"\x01" * 16  # an e-stop is not a takeover
 

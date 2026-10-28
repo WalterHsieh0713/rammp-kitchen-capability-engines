@@ -1,6 +1,7 @@
-"""self.arm in the engine: per-action resources, parameters, the sim model, standalone SheppyArm
+"""self.arm in the engine: per-action resources, parameters, the sim model, standalone RammpArm
 and mock mode. Each engine runs beside a FakeDriver and is driven through its execute_action."""
 
+import itertools
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -9,7 +10,7 @@ from types import SimpleNamespace
 import numpy as np
 import pybullet as p
 import pytest
-import sheppy_arm
+import rammp_arm
 from fake_driver import FLATBOT_URDF, FakeDriver, counts
 from rammp_orchestrator_interfaces.action import ExecuteAction
 from rammp_orchestrator_interfaces.msg import Result
@@ -29,9 +30,11 @@ from capability_engine.engine import Action, CapabilityEngine
 WAIT_S = 5.0  # how long a test waits for a server, a goal's acceptance or a node to go
 ACTION_WAIT_S = 30.0  # how long a test waits for an action's result
 POLL_S = 0.01
-ENGINE_ID = "arm_test_engine"
+# One engine id per test: Humble defers a node's teardown, and a lingering node with the same
+# name takes the shared /rosout publisher with it, losing the next engine's log lines.
+ENGINE_IDS = itertools.count()
 TARGET = [0.3] * 7  # the joint target of the tests' moves
-STRUCTURE = {"JOINTS", "CONTINUOUS", "ERRORS", "IMPEDANCE"}  # sheppy_arm constants, not tunables
+STRUCTURE = {"JOINTS", "CONTINUOUS", "ERRORS", "IMPEDANCE"}  # rammp_arm constants, not tunables
 CART_STEP = np.array([0.02, 0.0, 0.0])  # the mock Cartesian move: 2 cm along x
 PRE_STEP = np.array([0.0, 0.05, -0.05])  # the mock go_to_ee_pose: from the start to a line-up
 UNREACHABLE = [5.0, 0.0, 0.0]  # a tool position 5 m out: no IK solution
@@ -50,8 +53,8 @@ class ArmEngine(CapabilityEngine):
 
     actions = [Action("run", "Run")]
 
-    def __init__(self, body, **node_kwargs):
-        super().__init__(ENGINE_ID, **node_kwargs)
+    def __init__(self, engine_id, body, **node_kwargs):
+        super().__init__(engine_id, **node_kwargs)
         self.body = body
 
     def execute(self, action_id, params, ctx):
@@ -73,17 +76,18 @@ def env(ros):
     spinner = threading.Thread(target=executor.spin, daemon=True)
     spinner.start()
     engines = []
+    engine_id = f"arm_test_engine_{next(ENGINE_IDS)}"
 
     def make(body, **params):
         overrides = [Parameter("use_orchestrator", value=False)]
         overrides += [Parameter(name, value=value) for name, value in params.items()]
-        engine = ArmEngine(body, parameter_overrides=overrides)
+        engine = ArmEngine(engine_id, body, parameter_overrides=overrides)
         engines.append(engine)
         executor.add_node(engine)
         return engine
 
     def run(engine):
-        client = ActionClient(client_node, ExecuteAction, f"/{ENGINE_ID}/execute_action")
+        client = ActionClient(client_node, ExecuteAction, f"/{engine_id}/execute_action")
         try:
             assert client.wait_for_server(timeout_sec=WAIT_S)
             send = client.send_goal_async(ExecuteAction.Goal(action_id="run"))
@@ -95,7 +99,7 @@ def env(ros):
         finally:
             client.destroy()
 
-    yield SimpleNamespace(fake=fake, make=make, run=run, logs=logs)
+    yield SimpleNamespace(fake=fake, make=make, run=run, logs=logs, engine_id=engine_id)
     executor.shutdown()
     spinner.join()
     for engine in engines:
@@ -129,7 +133,7 @@ def test_token_none_until_orchestrator_sends_one(env):
     assert env.run(engine).status == Result.STATUS_SUCCESS
     goal = env.fake.goals["execute_joint_trajectory"][-1]
     assert list(goal.token) == [0] * 16
-    assert goal.sender_id == ENGINE_ID  # SENDER_ID comes from the capability
+    assert goal.sender_id == env.engine_id  # SENDER_ID comes from the capability
 
 
 def test_arm_outside_execute_raises(env):
@@ -169,9 +173,9 @@ def test_close_is_noop_under_engine(env):
 
 def test_params_declared_with_defaults(env):
     targets = {prm.target for prm in PARAMS}
-    for name in dir(sheppy_arm):
-        if name.isupper() and name not in STRUCTURE and not callable(getattr(sheppy_arm, name)):
-            assert (sheppy_arm, name) in targets, name
+    for name in dir(rammp_arm):
+        if name.isupper() and name not in STRUCTURE and not callable(getattr(rammp_arm, name)):
+            assert (rammp_arm, name) in targets, name
     defaults = {prm.name: prm.default for prm in PARAMS}
     assert defaults["state_wait_s"] == 10.0
     assert defaults["state_stale_s"] == 0.5
@@ -191,13 +195,13 @@ def test_params_declared_with_defaults(env):
         if prm.name == "cart_speed":
             assert value == 0.08
         elif prm.name == "sender_id":
-            assert value == ENGINE_ID
+            assert value == env.engine_id
         elif isinstance(prm.default, list):
             assert list(value) == prm.default, name
         else:
             assert value == prm.default, name
-    assert sheppy_arm.CART_SPEED == 0.08
-    assert sheppy_arm.SENDER_ID == ENGINE_ID
+    assert rammp_arm.CART_SPEED == 0.08
+    assert rammp_arm.SENDER_ID == env.engine_id
 
 
 def test_arm_params_refused_after_startup(env):
@@ -205,8 +209,8 @@ def test_arm_params_refused_after_startup(env):
     (res,) = engine.set_parameters([Parameter("arm.cart_speed", value=0.2)])
     assert not res.successful
     assert res.reason == "arm.* parameters are read at startup; restart to change"
-    assert engine.get_parameter("arm.cart_speed").value == sheppy_arm.CART_SPEED
-    assert sheppy_arm.CART_SPEED != 0.2
+    assert engine.get_parameter("arm.cart_speed").value == rammp_arm.CART_SPEED
+    assert rammp_arm.CART_SPEED != 0.2
 
 
 def test_sim_provider_uses_robot_description(env):
@@ -230,11 +234,11 @@ def assert_destroyed(node, other):
     """`node` is destroyed: its handle is gone and the graph (seen from `other`) lost it."""
     with pytest.raises(InvalidHandle):
         node.get_name()
-    wait_until(lambda: "sheppy_arm_test" not in other.get_node_names())
+    wait_until(lambda: "rammp_arm_test" not in other.get_node_names())
 
 
-def test_standalone_sheppy_arm(env):
-    arm = sheppy_arm.SheppyArm(node_name="sheppy_arm_test")
+def test_standalone_rammp_arm(env):
+    arm = rammp_arm.RammpArm(node_name="rammp_arm_test")
     node = arm.node
     try:
         assert sim.has_model_provider()
@@ -251,7 +255,7 @@ def test_standalone_sheppy_arm(env):
     wait_until(lambda: env.fake.count_subscribers("/joint_states") == 0)
 
 
-def test_standalone_sheppy_arm_needs_trajectory_server(ros, monkeypatch):
+def test_standalone_rammp_arm_needs_trajectory_server(ros, monkeypatch):
     monkeypatch.setattr(arm_module, "STATE_WAIT_S", SHORT_WAIT_S)
     sim.reset_for_tests()
     fake = FakeDriver(without_actions=("execute_joint_trajectory",))
@@ -264,11 +268,11 @@ def test_standalone_sheppy_arm_needs_trajectory_server(ros, monkeypatch):
         send_goal = "/execute_joint_trajectory/_action/send_goal"
         wait_until(lambda: send_goal not in dict(fake.get_service_names_and_types()))
         with pytest.raises(RuntimeError) as raised:
-            sheppy_arm.SheppyArm(node_name="sheppy_arm_test")
+            rammp_arm.RammpArm(node_name="rammp_arm_test")
         assert type(raised.value) is RuntimeError
         assert str(raised.value) == "no /execute_joint_trajectory action server"
         assert not sim.has_model_provider()  # the failed constructor closed itself
-        wait_until(lambda: "sheppy_arm_test" not in fake.get_node_names())
+        wait_until(lambda: "rammp_arm_test" not in fake.get_node_names())
         wait_until(lambda: fake.count_subscribers("/joint_states") == 0)
     finally:
         executor.shutdown()
@@ -317,7 +321,7 @@ def test_mock_dry_run(env):
     )
     wait_until(
         lambda: any(
-            m.name == ENGINE_ID and m.msg == "  trajectory: mock: not sent" for m in env.logs
+            m.name == env.engine_id and m.msg == "  trajectory: mock: not sent" for m in env.logs
         )
     )
     assert seen["counts"] == base  # no ROS entity to the driver at all
