@@ -6,7 +6,7 @@
 
 ## What it does
 
-Opens the microwave door with the Kinova arm. On an `open` goal it finds the handle from the
+Opens and closes the microwave door with the Kinova arm. On an `open` goal it finds the handle from the
 wrist camera (YOLO box → door-plane fit → the vertical bar sticking out of it, and the hinge
 edge), grasps the handle squared to the door, swings the door open (the largest swing, 75 down
 to 45°, whose whole arc passes the sim gates), lets go and pushes the door further open by
@@ -50,12 +50,36 @@ Served under `/microwave/`, types from `rammp_orchestrator_interfaces`:
 | `/microwave/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/microwave/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action | Params                                                                                                                                                                                  | Result payload                                     |
-| ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `open` | `execute` (bool, default false), `swing_deg` (45–75; default 50 with the push-open, else 75), `push_open` (bool, default true), `speed` ((0, 1\], default 1.0: scales every arm motion) | `{"executed": bool, "note": str, "runs_dir": str}` |
+| Action  | Params                                                                                                                                                                                  | Result payload                                     |
+| ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `open`  | `execute` (bool, default false), `swing_deg` (45–75; default 50 with the push-open, else 75), `push_open` (bool, default true), `speed` ((0, 1\], default 1.0: scales every arm motion) | `{"executed": bool, "note": str, "runs_dir": str}` |
+| `close` | `execute`, `speed` as above, plus the push-close settings in `close_door.CLOSE_DEFAULTS` (below)                                                                                        | `{"executed": bool, "note": str, "runs_dir": str}` |
+
+`close` pushes the open door shut with the side of the hand: no grasp, the gripper never touched (it
+may hold a container). It needs the door file the open saved, and the door not moved since. Its
+settings, by default the plain close (hand empty, fingers pointing left):
+
+| Setting                           | Default                        | Meaning                                                                                          |
+| --------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------ |
+| `door_deg`                        | door file                      | How far the door is open now (deg)                                                               |
+| `route_over`                      | `false`                        | Reach the swing start over the open door's top (keeps J4 off its limit)                          |
+| `over_above` / `over_past`        | `0.08` / `0.05`                | `route_over`: height above the door top / overshoot past the swing start (m)                     |
+| `side_past_hinge`                 | `0.08`                         | Swing start, sideways past the hinge (m)                                                         |
+| `push_radius` / `push_radius_end` | `0.28` / `0.26`                | Swing radius about the hinge, start / end (m)                                                    |
+| `push_z`                          | hand height                    | Height of the swing and push (m)                                                                 |
+| `keep_orientation` / `face_door`  | `false` / `false`              | Keep the hand as it is (holding a container) / face the closed door; neither: fingers point left |
+| `push_stop_short`                 | `0.03`                         | The swing stops this short of the modelled closed door (m)                                       |
+| `push_preload` / `push_max`       | `0.005` / stop_short + preload | The final push: past the closed door / at most (m)                                               |
+| `push_contact_nm`                 | `3.0`                          | Joint-torque change (J1–J4, Nm) whose double stops the push: door shut                           |
+| `hold_offset_x`                   | `0.0`                          | Plan with the door shifted in x (m); `-0.152` holding a container                                |
+| `retreat_dist`                    | `0.20`                         | Back straight out up to this far after the push (m)                                              |
+| `smooth`                          | `false`                        | The swing as one blended Cartesian trajectory                                                    |
+
+The close that latched on 2026-10-21, holding a container: `{"route_over": true, "keep_orientation": true, "door_deg": 90, "hold_offset_x": -0.152, "push_radius": 0.17, "push_radius_end": 0.15, "over_above": 0.18, "push_z": 0.22, "push_contact_nm": 6}`.
 
 Failures: `refused` (a check failed; the message says which and the arm holds), `stopped`
-(a motion stopped short), `bad_params`. On an executed success it marks the object `opened`.
+(a motion stopped short), `bad_params`. On an executed success it marks the object `opened`
+(true after `open`, false after `close`). Nothing measures whether the door latched: watch it.
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.

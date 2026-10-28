@@ -1,9 +1,11 @@
-"""The microwave capability: open the microwave door with the arm.
+"""The microwave capability: open and close the microwave door with the arm.
 
 Action `open` (open_door.run): detect the handle from the wrist camera, grasp it, swing the door
 open, let go and push it further open (the user's 10-07 push-open demo, replayed relative to the
-door), then park. Every leg is planned and sim-gated before it moves; any failed check stops the
-run with the arm holding where it is (EngineError "refused").
+door). Action `close` (close_door.run): push the door shut with the side of the hand -- no grasp,
+the gripper untouched (it may hold a container) -- against the door the open saved. Every leg is
+planned and sim-gated before it moves; any failed check stops the run with the arm holding where
+it is (EngineError "refused").
 
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets
 `execute`. Otherwise the goal is a dry run (detect, plan and gate every leg; nothing moves) and the
@@ -11,14 +13,30 @@ result says so. Someone stands at the e-stop whenever allow_execute is on.
 
     ros2 launch microwave microwave.launch.py use_orchestrator:=false
     make action CAP=microwave ACTION=open PARAMS='{"execute": false}'
+    make action CAP=microwave ACTION=close PARAMS='{"execute": false, "route_over": true}'
 """
 
 import rammp_arm
 from capability_engine import Action, CapabilityEngine, EngineError, run
 
+from . import close_door, open_door
 from . import microwave_common as mc
-from . import open_door
 from .perception import YOLO_MODEL, WristCamera
+
+COMMON = {
+    "execute": {"type": "boolean", "default": False},
+    "speed": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1.0},
+}
+
+
+def _schema(default):
+    """JSON Schema type of a close setting from its default (None: a number or unset)."""
+    if isinstance(default, bool):
+        return {"type": "boolean", "default": default}
+    if default is None:
+        return {"type": ["number", "null"], "default": None}
+    return {"type": "number", "default": default}
+
 
 # ROS parameter -> default. Topics and paths are per robot (the fragment's params:).
 PARAMS = {
@@ -43,13 +61,20 @@ class Capability(CapabilityEngine):
             params_schema={
                 "type": "object",
                 "properties": {
-                    "execute": {"type": "boolean", "default": False},
+                    **COMMON,
                     "swing_deg": {"type": "integer", "minimum": 45, "maximum": 75},
                     "push_open": {"type": "boolean", "default": True},
-                    "speed": {"type": "number", "exclusiveMinimum": 0, "maximum": 1, "default": 1.0},
                 },
             },
-        )
+        ),
+        Action(
+            "close",
+            "Close the door",
+            params_schema={
+                "type": "object",
+                "properties": {**COMMON, **{k: _schema(v) for k, v in close_door.CLOSE_DEFAULTS.items()}},
+            },
+        ),
     ]
 
     def __init__(self):
@@ -69,7 +94,7 @@ class Capability(CapabilityEngine):
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
         note = "allow_execute is false: ran as a DRY RUN" if params.get("execute") and not execute else ""
         if self.mock:
-            ctx.progress("open", 100.0, "mock: nothing detected or moved")
+            ctx.progress(action_id, 100.0, "mock: nothing detected or moved")
             return {"executed": False, "mock": True}
 
         ctx.checkpoint()
@@ -84,16 +109,21 @@ class Capability(CapabilityEngine):
         )
         mc.set_camera(camera)
         mc.set_output(self.get_logger().info)
-        ctx.progress("open", 0.0, note or ("executing" if execute else "dry run"))
+        ctx.progress(action_id, 0.0, note or ("executing" if execute else "dry run"))
+        log_args = {**params, "execute": execute}
         try:
-            ok = open_door.run(
-                self.arm,
-                execute,
-                swing_deg=params.get("swing_deg"),
-                push=bool(params.get("push_open", True)),
-                speed=speed,
-                log_args={**params, "execute": execute},
-            )
+            if action_id == "open":
+                ok = open_door.run(
+                    self.arm,
+                    execute,
+                    swing_deg=params.get("swing_deg"),
+                    push=bool(params.get("push_open", True)),
+                    speed=speed,
+                    log_args=log_args,
+                )
+            else:
+                settings = {k: v for k, v in params.items() if k in close_door.CLOSE_DEFAULTS}
+                ok = close_door.run(self.arm, execute, speed=speed, log_args=log_args, **settings)
         except mc.Refused as e:
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
         finally:
@@ -101,9 +131,11 @@ class Capability(CapabilityEngine):
             mc.set_camera(None)
             camera.close()
         if not ok:
-            raise EngineError("stopped", "the open stopped short -- the arm holds where it is", recoverable=True)
+            raise EngineError(
+                "stopped", f"the {action_id} stopped short -- the arm holds where it is", recoverable=True
+            )
         if execute:
-            ctx.update_object(self.instance_id, opened=True)
+            ctx.update_object(self.instance_id, opened=action_id == "open")
         return {"executed": execute, "note": note, "runs_dir": str(mc.RUNS_DIR)}
 
 
