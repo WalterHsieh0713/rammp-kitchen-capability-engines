@@ -14,6 +14,8 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 import sheppy_arm
+from builtin_interfaces.msg import Duration
+from control_msgs.msg import JointTolerance
 from diagnostic_msgs.msg import DiagnosticArray
 from rammp_arm_interfaces.action import (
     ExecuteJointTrajectory,
@@ -22,7 +24,7 @@ from rammp_arm_interfaces.action import (
     GoToPreset,
 )
 from rammp_arm_interfaces.msg import EeState as EeStateMsg
-from rammp_arm_interfaces.msg import GripperSetpoint
+from rammp_arm_interfaces.msg import GripperSetpoint, ImpedanceGains, JointImpedanceGainValues
 from rammp_arm_interfaces.msg import GripperState as GripperStateMsg
 from rammp_arm_interfaces.msg import StreamStatus as StreamStatusMsg
 from rammp_arm_interfaces.srv import CloseStream, ListControllers, OpenStream, SetGains
@@ -42,14 +44,28 @@ from rclpy.qos import (
 )
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import JointState
-from sheppy_arm import JOINTS, TOOL_Z, _wrap
+from sheppy_arm import ERRORS, JOINTS, TOOL_Z, _wrap
 from std_msgs.msg import String
+from trajectory_msgs.msg import JointTrajectoryPoint
 
+from capability_engine import sim
+from capability_engine.cornell_commands import (
+    CartesianTrajectoryCommand,
+    CloseGripperCommand,
+    JointCommand,
+    OpenGripperCommand,
+)
 from capability_engine.driver_state import ArmError, DriverState, NotInAction, StateTimeout
 
 STATE_WAIT_S = 10.0  # how long the first arm call in an action waits for the driver's state
 STATE_STALE_S = 0.5  # /joint_states, /ee_state or /gripper_state older than this is an error
 DIAGNOSTICS_STALE_S = 3.0  # /diagnostics (1 Hz) older than this is an error
+GOAL_ACCEPT_S = 5.0  # how long a motion waits for the driver to accept or reject its goal
+RESULT_MARGIN_S = 30.0  # a trajectory's result may come this long after its planned duration
+POLL_S = 0.01  # how often a running motion polls its result, its monitor and the action's cancel
+CANCEL_SETTLE_S = 0.4  # after cancelling a goal, how long to wait for the driver to settle it
+PREEMPTED = -6  # error_code of a goal settled by a cancel
+HALTED = -9  # error_code of a goal the driver stopped because another sender took control
 
 # QoS as in SheppyArm (sheppy_arm.py@7bc328ae:190-201) and the driver's docs/interface.md.
 LATCHED = QoSProfile(
@@ -184,6 +200,11 @@ def _ee_state(m):
     )
 
 
+def _tool_position(ee):
+    """The tool frame's position: the flange + TOOL_Z along the flange z."""
+    return ee.position + R.from_quat(ee.orientation).apply([0.0, 0.0, TOOL_Z])
+
+
 def _gripper_state(m):
     return GripperState(float(m.position), float(m.effort), float(m.current), bool(m.present))
 
@@ -272,6 +293,10 @@ class ArmInterface:
         self._cond = threading.Condition()
         self._latest = {}  # topic -> (dataclass, time.monotonic() when received)
         self.last_error = ""  # the most recent refusal or failure, also logged
+        self.last_path = []  # the last trajectory's measured tool path: [(t, x, y, z)]
+        self.monitor_stopped = False  # the last trajectory was stopped by its monitor
+        self._goal = None  # (goal handle, result future) of the running trajectory goal
+        self._path_t0 = None  # time.monotonic() its goal started; set: /ee_state adds to last_path
 
     # -- lifecycle ----------------------------------------------------------------------------
 
@@ -305,7 +330,11 @@ class ArmInterface:
         """A no-op under the engine, which owns the node."""
 
     def _settle(self):
-        """Cancel any running goal and close any open stream, waiting for each to settle."""
+        """Cancel any running goal and close any open stream, waiting for each to settle.
+        Called after the action has ended: uses the stored handles only, never _ensure_open()."""
+        goal = self._goal
+        if goal is not None:
+            self._cancel_goal(*goal)
 
     def _check_in_action(self):
         if not self._in_action:
@@ -375,14 +404,32 @@ class ArmInterface:
         self._node.get_logger().error(message)
         raise error(message)
 
+    def _refuse(self, message):
+        """SheppyArm's failure path: log `message` (its print), keep it in last_error, False."""
+        self.last_error = message
+        self._node.get_logger().error(message)
+        return False
+
+    def _check_command(self):
+        """Raise (and log) the ArmError that forbids a command now: e-stop, control taken."""
+        try:
+            self._driver.check_command()
+        except ArmError as e:
+            self._fail(type(e), str(e))
+
     # -- state --------------------------------------------------------------------------------
 
     def _store(self, topic, value):
         if value is None:
             return
+        now = time.monotonic()
         with self._cond:
-            self._latest[topic] = (value, time.monotonic())
+            self._latest[topic] = (value, now)
             self._cond.notify_all()
+        t0 = self._path_t0
+        if topic == "/ee_state" and t0 is not None:  # a trajectory runs: record the tool path
+            x, y, z = _tool_position(value)
+            self.last_path.append((now - t0, float(x), float(y), float(z)))
 
     def _on_control_status(self, m):
         self._driver.on_control_status(
@@ -443,7 +490,7 @@ class ArmInterface:
         TOOL_Z along the flange z) as [x, y, z, qx, qy, qz, qw]. Like SheppyArm, the latest
         values however old: only the driver-API reads (joint_states(), ...) refuse stale state."""
         js, ee, grip = (self._read(topic) for topic in MOTION_STATE)
-        tool = ee.position + R.from_quat(ee.orientation).apply([0.0, 0.0, TOOL_Z])
+        tool = _tool_position(ee)
         return {
             "position": _wrap(js.position),
             "velocity": js.velocity,
@@ -488,3 +535,175 @@ class ArmInterface:
             gate.close()
             self._node.destroy_subscription(sub)
         return received["urdf"]
+
+    # -- motions (SheppyArm's, sheppy_arm.py@7bc328ae:260-458) -------------------------------
+
+    def execute_command(self, cmd):
+        if isinstance(cmd, JointCommand):
+            return self.move_joints([np.asarray(cmd.pos, dtype=float)])
+        if isinstance(cmd, CartesianTrajectoryCommand):
+            return self.move_cartesian(cmd.traj)
+        if isinstance(cmd, OpenGripperCommand):
+            return self.gripper(0.0)
+        if isinstance(cmd, CloseGripperCommand):
+            return self.gripper(1.0)
+        raise TypeError(f"SheppyArm: unsupported command {type(cmd).__name__}")
+
+    def move_joints(self, knots, cart_lengths=None, speed_scale=1.0, impedance=None, monitor=None):
+        """Through joint `knots` (wrapped or not) from the measured joints. `cart_lengths`: the
+        Cartesian distance of each segment -- given, the path is timed in metres at CART_SPEED,
+        otherwise in joint-space radians at JOINT_SPEED. `impedance`: a dict like IMPEDANCE -> run
+        compliant (joint impedance) instead of stiff position control. `monitor`: polled at ~100 Hz
+        while the trajectory runs; when it returns True the goal is cancelled (the driver stops the
+        arm and holds), `monitor_stopped` is set and the call returns True."""
+        self._checkpoint()
+        samples = sheppy_arm.joint_trajectory(self.raw_joints(), knots, cart_lengths, speed_scale)
+        if samples is None:
+            return True
+        t, q, qd = samples
+        # fridge runs only: the wheelchair keep-out, every 2nd sample + end
+        if sim._KEEP_OUT is not None:
+            rb = sim.make_sim()[1]
+            for qi in list(q[::2]) + [q[-1]]:
+                msg = sim.keep_out_message(rb, qi)
+                if msg is not None:
+                    return self._refuse(
+                        f"  SheppyArm: the trajectory enters the keep-out zone ({msg}) -- "
+                        "nothing sent."
+                    )
+        return self._send(t, q, qd, impedance, monitor)
+
+    def move_cartesian(self, traj, impedance=None, speed_scale=1.0):
+        """`traj`: [(pos, quat xyzw), ...] in the base frame, like CartesianTrajectoryCommand. Each
+        segment (from the current pose) is a straight line with slerped orientation -- what Kortex
+        did -- cut into <= CART_STEP_M / CART_STEP_DEG steps before IK, the same density as
+        `plan_cartesian`, so the joint path is the one the sim gates checked."""
+        self._checkpoint()
+        knots, lengths = sheppy_arm.cartesian_knots(
+            sim.make_sim(), self.get_state()["ee_pos"], self.raw_joints(), traj
+        )
+        if knots is None:
+            return False
+        return self.move_joints(
+            knots, cart_lengths=lengths, impedance=impedance, speed_scale=speed_scale
+        )
+
+    def _checkpoint(self):
+        """Before every motion: NotInAction outside an action, wait while the action is paused,
+        Cancelled once it is cancelled."""
+        self._check_in_action()
+        self._ctx.checkpoint()
+
+    def _send(self, t, q, qd, impedance=None, monitor=None):
+        self._check_command()
+        why = self.not_ready()
+        if why is not None:
+            return self._refuse(f"  SheppyArm: {why} -- nothing sent.")
+        g = ExecuteJointTrajectory.Goal()
+        g.trajectory.joint_names = JOINTS
+        for ti, qi, qdi in zip(t, q, qd, strict=False):
+            pt = JointTrajectoryPoint()
+            pt.positions, pt.velocities = qi.tolist(), qdi.tolist()
+            sec = int(ti)
+            pt.time_from_start = Duration(sec=sec, nanosec=int(round((ti - sec) * 1e9)))
+            g.trajectory.points.append(pt)
+        tol = []
+        path_tol = impedance["path_tol"] if impedance else sheppy_arm.PATH_TOL_RAD
+        for name in JOINTS:
+            jt = JointTolerance()
+            jt.name, jt.position = name, path_tol
+            tol.append(jt)
+        g.path_tolerance = tol
+        g.control_mode = 0  # POSITION
+        if impedance:
+            g.control_mode = 1  # IMPEDANCE
+            g.gains = ImpedanceGains(
+                profile=ImpedanceGains.PROFILE_CUSTOM,
+                custom=JointImpedanceGainValues(
+                    kq=list(impedance["kq"]),
+                    zeta=float(impedance["zeta"]),
+                    torque_limit=list(impedance["torque_limit"]),
+                ),
+            )
+        g.preemption = 0  # QUEUE
+        g.sender_id = sheppy_arm.SENDER_ID
+        token = self._driver.token
+        if token is not None:
+            g.token = list(token)
+        client = self._actions["execute_joint_trajectory"]
+        if not client.wait_for_server(timeout_sec=STATE_WAIT_S):
+            self._fail(StateTimeout, "no /execute_joint_trajectory action server")
+        self._driver.begin_goal("execute_joint_trajectory")
+        try:
+            return self._run_goal(client, g, t[-1], token, monitor)
+        finally:
+            self._driver.end_goal()
+
+    def _run_goal(self, client, g, duration, token, monitor):
+        """Send trajectory goal `g`, record last_path while it runs and wait for its result."""
+        gh = self._wait(client.send_goal_async(g), GOAL_ACCEPT_S)
+        if gh is None or not gh.accepted:
+            return self._refuse("  SheppyArm: trajectory goal REJECTED")
+        rf = gh.get_result_async()
+        self._goal = (gh, rf)
+        # record the measured tool path while the goal runs (`last_path`: [(t, x, y, z)], from the
+        # /ee_state callback) -- in impedance mode this is where the door actually let the hand go
+        self.last_path = []
+        self._path_t0 = time.monotonic()
+        self.monitor_stopped = False
+        res = None
+        try:
+            t_end = time.monotonic() + duration + RESULT_MARGIN_S
+            while not rf.done() and time.monotonic() < t_end:
+                if self._ctx.cancelled():
+                    self._cancel_goal(gh, rf)
+                    self._ctx.checkpoint()  # raises the engine's Cancelled
+                if monitor is not None and not self.monitor_stopped and monitor():
+                    self.monitor_stopped = True
+                    gh.cancel_goal_async()  # the driver stops the arm, then settles PREEMPTED
+                time.sleep(POLL_S)
+            if rf.done():
+                res = rf.result()
+        except KeyboardInterrupt:
+            gh.cancel_goal_async()
+            self._node.get_logger().warning("  SheppyArm: Ctrl-C -- goal cancelled")
+            raise
+        finally:
+            self._path_t0 = None
+            self._goal = None
+        if res is None:
+            gh.cancel_goal_async()
+            return self._refuse("  SheppyArm: no result in time -- goal cancelled")
+        code = res.result.error_code
+        if self.monitor_stopped and code == PREEMPTED:
+            return True
+        if code == HALTED and token is not None:
+            self._driver.on_goal_halted()
+            self._check_command()  # raises ControlTaken: another sender took the arm from us
+        if code != 0:
+            self._refuse(
+                f"  SheppyArm: trajectory ended {ERRORS.get(code, code)} {res.result.error_string}"
+            )
+            fe = list(res.result.final_error.positions)
+            if fe:
+                self._node.get_logger().error(
+                    "  SheppyArm: final joint error (ref - actual) deg J1-J7 "
+                    f"{np.round(np.degrees(fe), 1)}"
+                )
+        return code == 0
+
+    def _cancel_goal(self, gh, rf):
+        """Cancel a goal and wait up to CANCEL_SETTLE_S for the driver to settle it."""
+        gh.cancel_goal_async()
+        deadline = time.monotonic() + CANCEL_SETTLE_S
+        while not rf.done() and time.monotonic() < deadline:
+            time.sleep(POLL_S)
+
+    @staticmethod
+    def _wait(fut, timeout_s):
+        t0 = time.monotonic()
+        while not fut.done():
+            if time.monotonic() - t0 > timeout_s:
+                return None
+            time.sleep(POLL_S)
+        return fut.result()

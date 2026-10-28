@@ -98,6 +98,11 @@ class Context:
         if engine._cancel.is_set() or self._goal.is_cancel_requested:
             raise Cancelled()
 
+    def cancelled(self) -> bool:
+        """Whether the action has been cancelled. Never blocks, even while paused: self.arm
+        polls it while a motion runs."""
+        return self._engine._cancel.is_set() or self._goal.is_cancel_requested
+
     def request_intent(self, intent_type: str, params: dict | None = None) -> Result:
         """Ask the orchestrator to delegate an intent (e.g. MOVE_BASE) and wait."""
         request = RequestIntent.Request(

@@ -127,7 +127,7 @@ CONTROLLERS = [
 
 class FakeCtx:
     """Stands in for engine.Context: checkpoint() blocks while paused and raises Cancelled once
-    cancelled."""
+    cancelled; cancelled() says whether it is, without blocking."""
 
     def __init__(self):
         self._paused = threading.Event()
@@ -147,6 +147,9 @@ class FakeCtx:
             self._cancelled.wait(PAUSE_POLL_S)
         if self._cancelled.is_set():
             raise Cancelled()
+
+    def cancelled(self):
+        return self._cancelled.is_set()
 
 
 def counts(node):
