@@ -148,7 +148,8 @@ engine id, so each capability sends its goals under its own name.
 
 No devices of its own: it reaches the arm, the gripper and the wrist camera through their
 drivers' topics. It needs the arm with a 2F-85 gripper, a wrist RGB-D camera with depth aligned
-to colour, and a calibrated camera tf (hand-eye) into `arm.frame`.
+to colour, and a calibrated camera tf (hand-eye) into `arm.frame`. The real alternative takes the
+GPU (`gpus: all`, the `rammp-cuda` image) for the handle detector's YOLO.
 
 ## Alternatives
 

@@ -13,7 +13,9 @@
 # nightly-20261027 is the base the nightly arm driver is built on (interfaces
 # 672a329f9036), so self.arm speaks the driver's exact messages. It carries the
 # arm, common and orchestrator interfaces; rammp_curobo_interfaces it does not.
-FROM ghcr.io/rammp-org/rammp-base:nightly-20261027
+# rammp-cuda, not rammp-base: the handle detector's YOLO runs on the Jetson's GPU (the
+# image ships CUDA 12.6 and the Jetson builds of torch 2.10.0 / torchvision 0.25.0).
+FROM ghcr.io/rammp-org/rammp-cuda:nightly-20261027
 
 WORKDIR /module_ws
 
@@ -26,8 +28,12 @@ RUN pip install --no-cache-dir pybullet==3.2.7
 
 # The handle detector (perception.HandleDetector): open3d for the door-plane fit and DBSCAN,
 # ultralytics for the YOLO microwave box (a dev stand-in; the demo uses a different detector).
-# TODO(pin): the versions that run on the Jetson today -- `pip show ultralytics open3d` there.
-RUN pip install --no-cache-dir ultralytics==TODO open3d==TODO
+# The versions the detector runs with on the Jetson (2026-10-28). The base's torch, torchvision
+# and numpy are held where they are (a constraints file of their installed versions), so
+# ultralytics can't swap the Jetson CUDA torch for a PyPI one.
+RUN pip freeze | grep -iE '^(torch|torchvision|numpy)==' > /tmp/keep.txt \
+    && pip install --no-cache-dir -c /tmp/keep.txt ultralytics==8.4.174 open3d==0.20.0 \
+    && rm /tmp/keep.txt
 
 # rammp_curobo_interfaces (the cuRobo planner's messages) is not in the base:
 # build it from a pinned RAMMP-CuRobo commit alongside the packages below.

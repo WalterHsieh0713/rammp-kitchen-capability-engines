@@ -25,6 +25,8 @@ container:
   # kept on the host, across container restarts.
   volumes:
     - /tmp/microwave_data:/microwave_data
+  # The handle detector's YOLO runs on the GPU (the mock has none and needs none).
+  gpus: all
 # Defaults for every value a deployment may change per robot or from the sheppy
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.

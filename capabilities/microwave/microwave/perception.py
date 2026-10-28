@@ -42,7 +42,6 @@ from rclpy.duration import Duration
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.time import Time
 from scipy.spatial.transform import Rotation as R
-from ultralytics import YOLO
 
 from .microwave_common import say
 
@@ -151,6 +150,8 @@ HANDLE_QUAT = np.array([-0.5, 0.5, 0.5, -0.5])
 
 class HandleDetector:
     def __init__(self, model=YOLO_MODEL):
+        from ultralytics import YOLO  # here, not at import: loads torch, which the mock never needs
+
         self._yolo = YOLO(model)
 
     def _box(self, rgb):
