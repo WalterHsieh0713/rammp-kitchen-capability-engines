@@ -45,7 +45,7 @@ from sensor_msgs.msg import JointState
 from sheppy_arm import JOINTS, TOOL_Z, _wrap
 from std_msgs.msg import String
 
-from capability_engine.driver_state import ArmError, DriverState, NotInAction
+from capability_engine.driver_state import ArmError, DriverState, NotInAction, StateTimeout
 
 STATE_WAIT_S = 10.0  # how long the first arm call in an action waits for the driver's state
 STATE_STALE_S = 0.5  # /joint_states, /ee_state or /gripper_state older than this is an error
@@ -80,6 +80,7 @@ SERVICES = {
 }
 # The first arm call in an action waits for these (SheppyArm's constructor did).
 MOTION_STATE = ("/joint_states", "/ee_state", "/gripper_state")
+NOT_IN_ACTION_MESSAGE = "the arm is only available inside an action"
 NO_STATE_MESSAGE = (
     "no /joint_states, /ee_state or /gripper_state -- is the sheppy arm node up, "
     "and ROS_DOMAIN_ID / RMW_IMPLEMENTATION exported?"
@@ -216,7 +217,9 @@ class _Gate(CallbackGroup):
     """The engine's callback group, closable. rclpy (Humble) raises InvalidHandle out of the
     executor's spin() when an entity is destroyed after the executor found it ready but before it
     took the message, so close() lets no new callback start and waits for the running ones; the
-    entities in the gate can then be destroyed while the engine's executor spins."""
+    entities in the gate can then be destroyed while the engine's executor spins. close() waits
+    for running callbacks with no timeout, so a callback on a gate must never block or call
+    end_action()."""
 
     def __init__(self, group):
         super().__init__()
@@ -274,6 +277,8 @@ class ArmInterface:
 
     def begin_action(self, ctx, token: bytes | None):
         """Start an action: arm calls are allowed until end_action(). Creates no ROS entity."""
+        if self._in_action or self._opened:  # the last action never ended: carry nothing over
+            self.end_action()
         self._ctx = ctx
         # A fresh baseline: this action's /control_status generation is its own, not the last's.
         self._driver = DriverState(standalone=self._standalone)
@@ -283,7 +288,9 @@ class ArmInterface:
     def end_action(self):
         """End the action: settle any goal or stream, destroy every ROS entity _open() made and
         forget the state they received, so the next action starts from the driver afresh."""
-        self._in_action = False
+        with self._cond:
+            self._in_action = False
+            self._cond.notify_all()  # a call waiting for state wakes with NotInAction
         try:
             self._settle()
         finally:
@@ -291,6 +298,7 @@ class ArmInterface:
                 self._destroy()
             with self._cond:
                 self._latest.clear()
+                self._cond.notify_all()
             self._ctx = None
 
     def close(self):
@@ -299,10 +307,16 @@ class ArmInterface:
     def _settle(self):
         """Cancel any running goal and close any open stream, waiting for each to settle."""
 
-    def _ensure_open(self):
+    def _check_in_action(self):
         if not self._in_action:
-            self._fail(NotInAction, "the arm is only available inside an action")
+            self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+
+    def _ensure_open(self):
+        self._check_in_action()
         with self._open_lock:
+            # Again under the lock: end_action() may have destroyed everything since the check.
+            if not self._in_action:
+                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
             if not self._opened:
                 self._open()
 
@@ -338,7 +352,7 @@ class ArmInterface:
         self._pubs["/estop"] = node.create_publisher(EStop, "/estop", ESTOP_QOS)
         self._opened = True
         if not all(self._wait_for(t) for t in MOTION_STATE):
-            self._fail(ArmError, NO_STATE_MESSAGE)
+            self._fail(StateTimeout, NO_STATE_MESSAGE)
 
     def _destroy(self):
         if self._gate is not None:
@@ -381,17 +395,24 @@ class ArmInterface:
         return _stream_status(m)
 
     def _wait_for(self, topic):
-        """Wait up to STATE_WAIT_S for the first message on `topic`; whether one came."""
+        """Wait up to STATE_WAIT_S for the first message on `topic`: its (value, receipt time),
+        or None if none came. NotInAction if the action ends meanwhile."""
         with self._cond:
-            return self._cond.wait_for(lambda: topic in self._latest, STATE_WAIT_S)
+            self._cond.wait_for(lambda: topic in self._latest or not self._in_action, STATE_WAIT_S)
+            if not self._in_action:
+                self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+            return self._latest.get(topic)
 
     def _read(self, topic, stale_s=None):
-        """The latest value on `topic` with its age; an error when there is none or it is stale."""
+        """The latest value on `topic` with its age; an error when there is none, or when it is
+        older than `stale_s` (None: never stale)."""
         self._ensure_open()
-        if not self._wait_for(topic):
-            self._fail(ArmError, f"no {topic} in {STATE_WAIT_S:g} s -- is the arm driver up?")
-        with self._cond:
-            value, received = self._latest[topic]
+        latest = self._wait_for(topic)
+        if latest is None:
+            if topic in MOTION_STATE:
+                self._fail(StateTimeout, NO_STATE_MESSAGE)
+            self._fail(StateTimeout, f"no {topic} in {STATE_WAIT_S:g} s -- is the arm driver up?")
+        value, received = latest
         age = time.monotonic() - received
         if stale_s is not None and age > stale_s:
             self._fail(
@@ -419,8 +440,9 @@ class ArmInterface:
 
     def get_state(self) -> dict:
         """SheppyArm's state dict: joints wrapped to +-pi, `ee_pos` the tool frame (flange +
-        TOOL_Z along the flange z) as [x, y, z, qx, qy, qz, qw]."""
-        js, ee, grip = self.joint_states(), self.ee_state(), self.gripper_state()
+        TOOL_Z along the flange z) as [x, y, z, qx, qy, qz, qw]. Like SheppyArm, the latest
+        values however old: only the driver-API reads (joint_states(), ...) refuse stale state."""
+        js, ee, grip = (self._read(topic) for topic in MOTION_STATE)
         tool = ee.position + R.from_quat(ee.orientation).apply([0.0, 0.0, TOOL_Z])
         return {
             "position": _wrap(js.position),
@@ -432,8 +454,8 @@ class ArmInterface:
 
     def raw_joints(self) -> np.ndarray:
         """Measured joints as the driver reports them (not wrapped): where a cuRobo plan must
-        start."""
-        return self.joint_states().position
+        start. The latest value however old, like get_state()."""
+        return self._read("/joint_states").position
 
     def not_ready(self) -> str | None:
         """Why the arm must not be commanded now (from /control_status), or None when it may be."""
@@ -443,8 +465,8 @@ class ArmInterface:
 
     def robot_description(self) -> str:
         """The driver's URDF, from /arm/robot_description (latched), through a one-shot
-        subscription destroyed after the first message."""
-        self._ensure_open()
+        subscription destroyed after the first message. Opens none of the arm's other entities."""
+        self._check_in_action()
         received = {}
         done = threading.Event()
 
@@ -459,7 +481,7 @@ class ArmInterface:
         try:
             if not done.wait(STATE_WAIT_S):
                 self._fail(
-                    ArmError,
+                    StateTimeout,
                     f"no /arm/robot_description in {STATE_WAIT_S:g} s -- is the arm driver up?",
                 )
         finally:

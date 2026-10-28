@@ -1,4 +1,6 @@
 import dataclasses
+import re
+import threading
 import time
 from pathlib import Path
 
@@ -7,10 +9,16 @@ import pytest
 from fake_driver import FakeCtx, counts
 
 from capability_engine import arm as arm_module
-from capability_engine.driver_state import ArmError, NotInAction
+from capability_engine.driver_state import ArmError, NotInAction, StateTimeout
 
 STRESS_CYCLES = 200  # actions in test_end_action_while_state_streams_in
 STRESS_HZ = 1000.0  # the fake's state rate there: a message is nearly always in flight
+WAKE_DELAY_S = 0.3  # how long a call waits for state before end_action() in the wake-up test
+WAKE_LIMIT_S = 2.0  # it must return well before STATE_WAIT_S (10 s)
+SHEPPY_NO_STATE = (
+    "no /joint_states, /ee_state or /gripper_state -- is the sheppy arm node up, "
+    "and ROS_DOMAIN_ID / RMW_IMPLEMENTATION exported?"
+)
 
 
 def test_no_resources_until_first_call(arm_env):
@@ -84,11 +92,10 @@ def test_state_reads_are_dataclasses_with_age(arm_env):
 
 def test_robot_description_is_one_shot(arm_env):
     arm, node, _ = arm_env
+    base = counts(node)
     arm.begin_action(FakeCtx(), None)
-    arm.get_state()
-    opened = counts(node)
     assert arm.robot_description() == Path("/fixtures/urdf/flatbot.urdf").read_text()
-    assert counts(node) == opened
+    assert counts(node) == base  # its own subscription is gone, and nothing else was opened
 
 
 def test_new_action_ignores_the_last_actions_generation(arm_env):
@@ -118,3 +125,73 @@ def test_end_action_while_state_streams_in(arm_env):
         arm.begin_action(FakeCtx(), None)
         arm.get_state()
         arm.end_action()
+
+
+def test_get_state_returns_stale_values_like_sheppy_arm(arm_env):
+    arm, _, fake = arm_env
+    arm.begin_action(FakeCtx(), None)
+    arm.get_state()
+    fake.pause_publishing()
+    time.sleep(arm_module.STATE_STALE_S + 0.1)
+    assert set(arm.get_state()) == {"position", "velocity", "effort", "ee_pos", "gripper_pos"}
+    assert arm.raw_joints().shape == (7,)
+
+
+def test_state_timeout_keeps_sheppy_arms_message(arm_env, monkeypatch):
+    arm, _, fake = arm_env
+    monkeypatch.setattr(arm_module, "STATE_WAIT_S", 0.2)
+    fake.pause_publishing()
+    arm.begin_action(FakeCtx(), None)
+    with pytest.raises(StateTimeout, match=re.escape(SHEPPY_NO_STATE)) as raised:
+        arm.get_state()
+    assert isinstance(raised.value, RuntimeError)  # what SheppyArm's callers catch
+
+
+def test_end_action_between_check_and_open(arm_env, monkeypatch):
+    arm, node, _ = arm_env
+    base = counts(node)
+    arm.begin_action(FakeCtx(), None)
+    arm.get_state()
+    check = arm._check_in_action
+
+    def check_then_end():  # another thread's end_action() lands between the check and the lock
+        check()
+        arm.end_action()
+
+    monkeypatch.setattr(arm, "_check_in_action", check_then_end)
+    with pytest.raises(NotInAction):
+        arm.get_state()
+    assert counts(node) == base
+
+
+def test_end_action_wakes_a_waiting_call(arm_env):
+    arm, node, fake = arm_env
+    base = counts(node)
+    fake.pause_publishing()
+    arm.begin_action(FakeCtx(), None)
+    errors = []
+
+    def call():
+        try:
+            arm.get_state()
+        except ArmError as error:
+            errors.append(error)
+
+    caller = threading.Thread(target=call)
+    caller.start()
+    time.sleep(WAKE_DELAY_S)
+    t0 = time.monotonic()
+    arm.end_action()
+    caller.join(WAKE_LIMIT_S)
+    assert not caller.is_alive() and time.monotonic() - t0 < WAKE_LIMIT_S
+    assert [type(e) for e in errors] == [NotInAction]
+    assert counts(node) == base
+
+
+def test_begin_action_ends_an_unended_action(arm_env):
+    arm, node, _ = arm_env
+    base = counts(node)
+    arm.begin_action(FakeCtx(), None)
+    arm.get_state()
+    arm.begin_action(FakeCtx(), None)  # the last action never got end_action()
+    assert counts(node) == base

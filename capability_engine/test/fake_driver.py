@@ -259,7 +259,9 @@ class FakeDriver(Node):
 
     def set_publish_rate(self, hz):
         """Publish /joint_states, /ee_state and /gripper_state at `hz` instead of STATE_HZ."""
-        self.destroy_timer(self._state_timer)
+        # Cancelled, not destroyed: destroying a timer while the executor spins can raise
+        # InvalidHandle out of spin() (rclpy Humble), as arm.py's _Gate explains.
+        self._state_timer.cancel()
         self._state_timer = self.create_timer(
             1.0 / hz, self._publish_state, callback_group=self._group
         )

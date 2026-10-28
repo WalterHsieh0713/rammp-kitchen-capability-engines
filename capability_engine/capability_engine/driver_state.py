@@ -40,6 +40,10 @@ class NoToken(ArmError):
     """A command needed a control token and none was given."""
 
 
+class StateTimeout(ArmError, RuntimeError):
+    """The driver's state did not arrive in time (a RuntimeError, as SheppyArm raised)."""
+
+
 class DriverState:
     def __init__(self, *, standalone: bool = False):
         self._standalone = standalone  # True: SheppyArm's wording when no token is held
