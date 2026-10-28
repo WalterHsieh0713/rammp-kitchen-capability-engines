@@ -45,6 +45,11 @@ class Capability(CapabilityEngine):
         if to < 1:
             raise EngineError("bad_params", "'to' must be at least 1", recoverable=True)
 
+        if not self.mock:
+            # self.arm talks to the arm driver; the first call opens it for this action.
+            state = self.arm.get_state()
+            self.get_logger().info(f"arm joints {state['position']}, tool at {state['ee_pos'][:3]}")
+
         for n in range(1, to + 1):
             ctx.checkpoint()  # honours pause and cancel between steps
             # A real capability would command hardware here, unless self.mock.

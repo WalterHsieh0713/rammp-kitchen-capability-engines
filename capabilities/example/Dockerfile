@@ -4,20 +4,30 @@
 # the same packages you build natively in ~/ros2_ws — capability_engine and
 # this capability — and runs the same launch file.
 #
-# Pin an explicit base VERSION, never :humble or :latest — the tag records
-# which rammp-interfaces-ros2 version this image speaks. Use rammp-cuda only
-# if the node needs the GPU, and then drop torch/torchvision from your
-# requirements (the base ships the Jetson wheels). arm64 only.
-FROM ghcr.io/rammp-org/rammp-base:1.1.0-jp6
+# Pin an explicit base tag (a release or a dated nightly), never :humble or
+# :latest — the tag records which rammp-interfaces-ros2 version this image
+# speaks. Use rammp-cuda only if the node needs the GPU, and then drop
+# torch/torchvision from your requirements (the base ships the Jetson wheels).
+# arm64 only.
+#
+# nightly-20261027 is the base the nightly arm driver is built on (interfaces
+# 672a329f9036), so self.arm speaks the driver's exact messages. It carries the
+# arm, common and orchestrator interfaces; rammp_curobo_interfaces it does not.
+FROM ghcr.io/rammp-org/rammp-base:nightly-20261027
 
 WORKDIR /module_ws
 
-# TEMPORARY: rammp_orchestrator_interfaces is on rammp-interfaces-ros2 dev
-# (1.2.0) but not yet in a rammp-base release, so build it from a pinned
-# commit alongside the packages below. Delete these two lines when the FROM
-# above moves to a base that carries 1.2.0.
-ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/2bf67d4099842fd3da96bdc465c0ae8323d8df4b.tar.gz /tmp/interfaces.tar.gz
-RUN mkdir -p src && tar -xzf /tmp/interfaces.tar.gz -C src --strip-components=1 --wildcards '*/rammp_orchestrator_interfaces' && rm /tmp/interfaces.tar.gz
+# self.arm plans and checks poses on a PyBullet model of the arm. PyPI ships no
+# arm64 wheel, so this compiles from source (the base has gcc, g++ and Python.h).
+# 3.2.7 is the version the SheppyArm goldens were recorded with. numpy is in the
+# base; scipy comes from rosdep (capability_engine's package.xml). Its own layer,
+# before the COPYs, so editing code never recompiles it.
+RUN pip install --no-cache-dir pybullet==3.2.7
+
+# rammp_curobo_interfaces (the cuRobo planner's messages) is not in the base:
+# build it from a pinned RAMMP-CuRobo commit alongside the packages below.
+ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b1b72933dbabf76.tar.gz /tmp/curobo.tar.gz
+RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
 
 COPY capability_engine/ src/capability_engine/
 COPY capabilities/example/ src/example/

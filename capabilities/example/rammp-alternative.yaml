@@ -25,6 +25,58 @@ container:
 # TUI; a profile can override only keys listed here. Hosts, ports and file
 # paths go here too, never hard-coded in the node.
 params:
-  publish_rate_hz: 1.0
+  # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
+  "arm.tool_z": 0.12
+  "arm.dt": 0.02
+  "arm.joint_speed": 0.85
+  "arm.cart_speed": 0.16
+  "arm.contact_joint_speed": 0.5
+  "arm.contact_cart_speed": 0.09
+  "arm.min_duration_s": 1.0
+  "arm.cart_step_m": 0.02
+  "arm.cart_step_deg": 5.0
+  "arm.rot_equiv_m": 0.15
+  "arm.max_knot_jump_deg": 20.0
+  "arm.path_tol_rad": 0.15
+  "arm.gripper_force": 0.5
+  "arm.gripper_speed": 0.5
+  "arm.frame": "arm_mount"
+  "arm.sender_id": "microwave"
+  "arm.go_to_speed_scale": 0.3
+  "arm.go_to_timeout_s": 120.0
+  "arm.go_to_track_m": 0.01
+  "arm.go_to_track_deg": 2.0
+  "arm.max_ik_err": 0.02
+  "arm.max_step_jump_deg": 20.0
+  "arm.j6_guard_deg": 115.0
+  "arm.j4_guard_deg": 144.0
+  "arm.max_continuous_delta_deg": 170.0
+  "arm.keep_out_err": 9.0
+  "arm.ik_max_iterations": 200
+  "arm.clearance_query_m": 0.5
+  "arm.fingertip_open_rad": 0.0
+  "arm.finger_closed_rad": 0.7
+  "arm.state_wait_s": 10.0
+  "arm.state_stale_s": 0.5
+  "arm.diagnostics_stale_s": 3.0
+  "arm.goal_accept_s": 5.0
+  "arm.result_margin_s": 30.0
+  "arm.poll_s": 0.01
+  "arm.cancel_settle_s": 0.4
+  "arm.halt_status_wait_s": 0.2
+  "arm.planner_wait_s": 5.0
+  "arm.go_to_settle_s": 0.3
+  "arm.gripper_period_s": 0.02
+  "arm.gripper_moved": 0.002
+  "arm.gripper_judge_after_s": 0.5
+  "arm.gripper_still_s": 0.3
+  "arm.plan_timeout_s": 30.0
+  "arm.service_wait_s": 5.0
+  "arm.service_call_s": 10.0
+  "arm.stream_timeout_s": 0.1
+  "arm.publisher_match_s": 1.0
+  "arm.close_stream_wait_s": 1.0
+  "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
+  "arm.mock_urdf": ""
 publishes: [/example/status]
 subscribes: []

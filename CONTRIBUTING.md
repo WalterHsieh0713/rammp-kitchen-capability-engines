@@ -63,3 +63,43 @@ changed without editing the manifest. sheppy appends
 `ros2 launch`; `validate_fragment.py` enforces both. Large configuration ships in
 the image, chosen by a parameter. See
 [Configuring a deployment](https://rammp-org.github.io/configuring-a-deployment).
+
+## Using `self.arm`
+
+Every `CapabilityEngine` has `self.arm`, an `ArmInterface` with the same methods
+as the students' `SheppyArm` (`get_state`, `move_joints`, `move_cartesian`,
+`gripper`, `go_to_ee_pose`, ...), plus a sim of the arm for checking poses before
+they are sent. Use it inside `execute()`: the arm's ROS resources exist from the
+first arm call to the end of that `execute()`.
+
+**Rules for the sim.** One sim per process, shared with `self.arm`, built from
+the driver's own model. These rules keep your checks and the arm in agreement:
+
+- Get the sim from `make_sim()` (`capability_engine.sim`). Never build your own
+  PyBullet world or pass a different URDF while the driver is up.
+- If you checked joints, send joints (`move_joints`). If you send poses
+  (`move_cartesian`), check them with `cartesian_knots` on the shared sim, not
+  with your own IK: a different solver may land on different joints.
+- Look poses up in `sheppy_arm.FRAME`, not a hard-coded frame. `arm_mount` and
+  `arm_base_link` agree on dojo and are 30 degrees apart on flatbot and gen_1_5.
+- Settable values are set through functions, not by assigning to a re-export:
+  turn the keep-out on with `set_keep_out(fn)`. Speeds such as
+  `sheppy_arm.CART_SPEED *= s` are fine.
+
+**Control comes from the orchestrator.** It grants the arm when it starts your
+action. Never call `/acquire_control` or `/release_control`; `self.arm` does not
+either.
+
+**No `print`.** Ruff forbids it. When you migrate a student script, turn each
+`print(msg)` into `self.get_logger().info(msg)` (`warn`/`error` where it was a
+warning or failure) with the same message text.
+
+**Parameters.** Every tunable of `self.arm` is a ROS parameter `arm.<name>` whose
+default is the students' value: speeds, tolerances, timeouts, IK guards. They are
+read once at startup (a change needs a restart) and are listed with their meaning
+in [`capabilities/example/docs/interface.md`](capabilities/example/docs/interface.md);
+copy that table and the `arm.*` keys under `params:` in the real fragment into
+your capability. A test checks the example's fragment and table against
+`capability_engine/arm_params.py`. In mock runs (`mock:=true`) there is no
+driver, so no model: set `arm.mock_urdf` to the URDF file `make_sim()` should
+load (and `arm.mock_joints` for where the arm starts).

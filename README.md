@@ -87,6 +87,15 @@ To run it on the robot, transcribe the capability's two fragments into
 [`rammp-deployments`](https://github.com/rammp-org/rammp-deployments)'s
 `december_2026/sheppy-manifest.yaml` as a node with both alternatives.
 
+## Controlling the arm
+
+Every capability has `self.arm`, the same arm API the microwave students wrote
+against (`move_joints`, `move_cartesian`, `gripper`, ...), backed by the real
+arm driver and a shared PyBullet sim for checking poses. Its tunables are
+`arm.*` ROS parameters. See
+[Using `self.arm`](CONTRIBUTING.md#using-selfarm) for the rules, and
+`capabilities/example` for a working call.
+
 ## A capability
 
 ```
@@ -95,7 +104,7 @@ capabilities/<name>/             one ament_python package per capability (`make 
   package.xml, setup.py, setup.cfg
   <name>/node.py                the capability: a CapabilityEngine subclass
   launch/<name>.launch.py       what both the native build and the image run
-  Dockerfile                    FROM a pinned rammp-base / rammp-cuda version, built from the repo root
+  Dockerfile                    FROM a pinned rammp-base / rammp-cuda tag, built from the repo root
   rammp-alternative.yaml        the real alternative: sheppy's schema plus `tier`
   rammp-alternative.mock.yaml   same topics, no hardware — CI smoke-tests this one
   docs/interface.md             the page rammp-docs pulls; keep its headings

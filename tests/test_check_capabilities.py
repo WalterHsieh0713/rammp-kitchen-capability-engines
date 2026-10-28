@@ -61,12 +61,17 @@ def test_image_outside_capability_namespace_fails(repo):
 
 @pytest.mark.parametrize(
     "base",
-    ["ros:humble", "ghcr.io/rammp-org/rammp-base:humble", "ghcr.io/rammp-org/rammp-base:latest"],
+    [
+        "ros:humble",
+        "ghcr.io/rammp-org/rammp-base:humble",
+        "ghcr.io/rammp-org/rammp-base:latest",
+        "ghcr.io/rammp-org/rammp-base:nightly",
+    ],
 )
 def test_unpinned_base_fails(repo, base):
     dockerfile = repo / "Dockerfile"
     dockerfile.write_text(
-        dockerfile.read_text().replace("ghcr.io/rammp-org/rammp-base:1.1.0-jp6", base)
+        dockerfile.read_text().replace("ghcr.io/rammp-org/rammp-base:nightly-20261027", base)
     )
     assert f"FROM {base}" in errors(repo)
 

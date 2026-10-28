@@ -34,7 +34,8 @@ REQUIRED = (
     "docs/interface.md",
 )
 NAME = re.compile(r"^[a-z][a-z0-9_]*$")
-PINNED_BASE = re.compile(r"^ghcr\.io/rammp-org/rammp-(base|cuda):\d+\.\d+\.\d+\S*$")
+# A release (1.1.0-jp6) or a dated nightly (nightly-20261027), never a moving tag.
+PINNED_BASE = re.compile(r"^ghcr\.io/rammp-org/rammp-(base|cuda):(\d+\.\d+\.\d+\S*|nightly-\d{8})$")
 # Mutable tags a demo profile must never point at.
 FLOATING_TAGS = ("dev", "main", "latest")
 
@@ -53,7 +54,8 @@ def check_dockerfile(path):
         if image not in stages and not PINNED_BASE.match(image):
             errors.append(
                 f"FROM {image}: build from a versioned ghcr.io/rammp-org/rammp-base or "
-                "rammp-cuda tag (e.g. rammp-base:1.1.0-jp6), not a floating or upstream image"
+                "rammp-cuda tag (e.g. rammp-base:1.1.0-jp6 or rammp-base:nightly-20261027), "
+                "not a floating or upstream image"
             )
         if len(args) >= 3 and args[1].upper() == "AS":
             stages.add(args[2])
