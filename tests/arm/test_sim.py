@@ -186,3 +186,42 @@ def test_clearance_open_and_closed_on_the_driver_model():
     assert d_open < sim.CLEARANCE_QUERY_M and d_closed < sim.CLEARANCE_QUERY_M
     assert what_open.endswith("vs box") and what_closed.endswith("vs box")
     assert d_open != d_closed
+
+
+def test_default_ee_link_sentinel_applies_only_to_ee_link():
+    cornell_sim()
+    with pytest.raises(sim.SimModelError, match="urdf_path"):
+        sim.make_sim(sim.DEFAULT_EE_LINK)  # a path equal to the sentinel is still a path
+
+
+def test_base_pose_and_initial_joints_compare_by_value():
+    scene, rb = cornell_sim()
+    pose = scene.robot_base_pose
+    as_numpy = sim.Pose(np.array(pose.position), np.array(pose.orientation))
+    joints = G["meta"]["initial_joints"]
+    for initial in (joints, tuple(joints), np.array(joints)):
+        assert sim.make_sim(base_pose=as_numpy, initial_joints=initial) == (scene, rb)
+    moved = sim.Pose(np.array(pose.position) + 0.1, np.array(pose.orientation))
+    with pytest.raises(sim.SimModelError, match="base_pose"):
+        sim.make_sim(base_pose=moved)
+    with pytest.raises(sim.SimModelError, match="initial_joints"):
+        sim.make_sim(initial_joints=np.array(joints) + 0.1)
+    with pytest.raises(sim.SimModelError, match="initial_joints"):
+        sim.make_sim(initial_joints=joints[:3])
+
+
+def test_model_provider_refused_after_an_explicit_path():
+    sim.reset_for_tests()
+    sim.make_sim("/fixtures/urdf/flatbot.urdf")
+
+    def provider():
+        return Path("/fixtures/urdf/flatbot.urdf").read_text()
+
+    with pytest.raises(sim.SimModelError, match="flatbot.urdf"):
+        sim.set_model_provider(provider)
+    assert not sim.has_model_provider()
+    sim.set_model_provider(None)  # offline stays allowed
+    sim.reset_for_tests()
+    sim.set_model_provider(provider)  # no copy yet: fine
+    assert sim.has_model_provider()
+    sim.reset_for_tests()

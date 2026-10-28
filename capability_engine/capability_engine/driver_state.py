@@ -10,6 +10,7 @@ STREAM_CLOSED_MESSAGE = (
     "the driver closed the stream: your loop stopped sending for more than timeout_s, "
     "or the driver could not solve that pose"
 )
+ESTOPPED_REASON = "arm is E-STOPPED -- clear it first"  # not_ready()'s reason for an e-stop
 
 
 class ArmError(Exception):
@@ -134,17 +135,18 @@ class DriverState:
             return "no /control_status (latched) -- arm driver not up?"
         estopped, enforced, owned, owner_id = st
         if estopped:
-            return "arm is E-STOPPED -- clear it first"
-        if enforced:
+            return ESTOPPED_REASON
+        # With a token, the driver judges it: the orchestrator acquires control under its own
+        # owner_id, not this sender_id.
+        if enforced and token is None:
             if owned and owner_id != sender_id:
                 return f"the arm is owned by {owner_id!r}"
-            if token is None:
-                if self._standalone:
-                    return (
-                        "arbitration is ENFORCED and this code holds no token "
-                        "(/acquire_control not implemented here)"
-                    )
-                return "no control token: arbitration is enforced and none was given"
+            if self._standalone:
+                return (
+                    "arbitration is ENFORCED and this code holds no token "
+                    "(/acquire_control not implemented here)"
+                )
+            return "no control token: arbitration is enforced and none was given"
         return None
 
     def check_command(self):

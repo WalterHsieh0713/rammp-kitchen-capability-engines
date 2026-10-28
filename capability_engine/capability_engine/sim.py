@@ -82,9 +82,15 @@ _KEEP_OUT: Callable | None = None
 def set_model_provider(fn):
     """`fn() -> URDF text` of the model the driver is running (the live arm).
 
-    None: offline, give make_sim a path.
+    None: offline, give make_sim a path. SimModelError when the sim was already built from an
+    explicit path: that copy is not the provider's model.
     """
     global _MODEL_PROVIDER
+    if fn is not None and _SIM_ARGS is not None and _SIM_ARGS["urdf_path"] is not None:
+        raise SimModelError(
+            f"the sim was already built from {_SIM_ARGS['urdf_path']}: a model provider "
+            "needs make_sim() called with no path"
+        )
     _MODEL_PROVIDER = fn
 
 
@@ -189,6 +195,19 @@ def _find(client, robot_id, names):
 DEFAULT_EE_LINK = "arm_tool_frame"
 
 
+def _same_arg(name, given, built):
+    """Whether make_sim argument `name` given now matches the value the copy was built with:
+    base_pose and initial_joints by value (numpy, list or tuple alike), the rest by ==."""
+    if name == "base_pose":
+        given, built = (np.concatenate([x.position, x.orientation]) for x in (given, built))
+    elif name != "initial_joints":
+        return given == built
+    elif built is None:  # built with the default state
+        return False
+    given, built = np.asarray(given, float), np.asarray(built, float)
+    return given.shape == built.shape and bool(np.allclose(given, built))
+
+
 def make_sim(urdf_path=None, base_pose=None, ee_link=DEFAULT_EE_LINK, initial_joints=None):
     """The process's one PyBullet copy of the arm: (Scene, SimRobot).
 
@@ -199,7 +218,8 @@ def make_sim(urdf_path=None, base_pose=None, ee_link=DEFAULT_EE_LINK, initial_jo
     global _SIM, _SIM_ARGS
     if urdf_path is not None and _MODEL_PROVIDER is not None:
         raise SimModelError(
-            "a driver model is live: self.arm simulates the driver's URDF, not an explicit path"
+            "make_sim() loads the provided model (the driver's URDF, or arm.mock_urdf in mock "
+            "mode): call it with no path"
         )
     args = {
         "urdf_path": urdf_path,
@@ -212,7 +232,9 @@ def make_sim(urdf_path=None, base_pose=None, ee_link=DEFAULT_EE_LINK, initial_jo
         differ = [
             k
             for k, v in args.items()
-            if v is not None and v != DEFAULT_EE_LINK and v != _SIM_ARGS[k]
+            if v is not None
+            and not (k == "ee_link" and v == DEFAULT_EE_LINK)
+            and not _same_arg(k, v, _SIM_ARGS[k])
         ]
         if differ:
             raise SimModelError(

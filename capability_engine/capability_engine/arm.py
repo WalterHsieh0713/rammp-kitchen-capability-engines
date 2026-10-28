@@ -71,6 +71,7 @@ from capability_engine.cornell_commands import (
     OpenGripperCommand,
 )
 from capability_engine.driver_state import (
+    ESTOPPED_REASON,
     ArmError,
     DriverState,
     EStopped,
@@ -292,7 +293,7 @@ def _goal_feedback(m):
     )
 
 
-def impedance_gains(gains) -> ImpedanceGains:
+def _impedance_gains(gains) -> ImpedanceGains:
     """`gains` as the driver's ImpedanceGains: None (the message default), a profile name in
     GAIN_PROFILES, or a dict {"kq": 7 floats, "zeta": float, "torque_limit": 7 floats} (custom
     joint impedance, SheppyArm's IMPEDANCE without path_tol). ArmError for anything else."""
@@ -318,6 +319,12 @@ def impedance_gains(gains) -> ImpedanceGains:
         f"gains must be one of {', '.join(GAIN_PROFILES)} or a dict "
         f'{{"kq": 7 floats, "zeta": float, "torque_limit": 7 floats}}, not {gains!r}'
     )
+
+
+def _refusal(why):
+    """The driver API's exception for not_ready() reason `why`: EStopped for an e-stop (as
+    Stream.send raises), ArmError otherwise."""
+    return EStopped if why == ESTOPPED_REASON else ArmError
 
 
 def _duration(t):
@@ -976,11 +983,17 @@ class ArmInterface:
         """Tool (tool_frame = ee_pos) to (pos, quat xyzw) in FRAME: cuRobo plans from the measured
         joints and the driver executes. Blocking; True if the driver succeeded and the tool ended
         within GO_TO_TRACK_M. `orientation_hold` (HOLD_*), `control_mode` (POSITION or IMPEDANCE)
-        and `gains` (see impedance_gains()) are the driver's goal fields. `feedback`: called with
-        each GoalFeedback, on the executor (it must not block)."""
+        and `gains` (see _impedance_gains()) are the driver's goal fields. `feedback`: called with
+        each GoalFeedback, on the executor (it must not block). In mock mode with a sim, the
+        joints become the sim's IK solution for the pose when it is within MAX_IK_ERR (seeded
+        from the mock joints); otherwise they stay."""
         if self._mock:
             self._checkpoint()
-            return self._mock_sent(label)
+            model, q = self._mock_sim(), None
+            if model is not None:
+                solution, err = sim.solve_ik(*model, pos[:3], quat, self._mock_q)
+                q = solution if err <= sim.MAX_IK_ERR else None
+            return self._mock_sent(label, q)
         g = GoToEEPose.Goal()
         g.target = PoseStamped()
         g.target.header.frame_id = sheppy_arm.FRAME
@@ -1046,7 +1059,7 @@ class ArmInterface:
         return self._go_to("go_to_preset", g, label, speed_scale, control_mode, gains, feedback)
 
     def _go_to(self, name, g, label, speed_scale, control_mode, gains, feedback):
-        g.gains = impedance_gains(gains)  # a bad `gains` raises before anything is sent
+        g.gains = _impedance_gains(gains)  # a bad `gains` raises before anything is sent
         self._checkpoint()
         ctx = self._ctx
         self._check_command()
@@ -1110,11 +1123,11 @@ class ArmInterface:
             g.trajectory.points.append(pt)
         path_tol = impedance["path_tol"] if impedance else sheppy_arm.PATH_TOL_RAD
         g.path_tolerance = _tolerances(JOINTS, path_tol)
-        g.control_mode = 0  # POSITION
+        g.control_mode = POSITION
         if impedance:
-            g.control_mode = 1  # IMPEDANCE
-            g.gains = impedance_gains({k: impedance[k] for k in GAIN_KEYS})
-        g.preemption = 0  # QUEUE
+            g.control_mode = IMPEDANCE
+            g.gains = _impedance_gains({k: impedance[k] for k in GAIN_KEYS})
+        g.preemption = QUEUE
         client = self._action("execute_joint_trajectory")
         if not self._wait_for_server(client, ctx, STATE_WAIT_S):
             self._fail(StateTimeout, "no /execute_joint_trajectory action server")
@@ -1173,9 +1186,16 @@ class ArmInterface:
             g.token = list(token)
 
         def on_feedback(m):
-            feedback(_goal_feedback(m.feedback))
+            # On the executor: an exception here would escape its spin(), so it is only logged.
+            try:
+                feedback(_goal_feedback(m.feedback))
+            except Exception as e:  # noqa: BLE001 -- the caller's callback, any error
+                self._node.get_logger().error(f"{name}: the feedback callback raised {e!r}")
 
-        self._driver.begin_goal(name)
+        try:
+            self._driver.begin_goal(name)
+        except ModeConflict as e:
+            self._fail(ModeConflict, str(e))
         try:
             # The client is used under _cond, after _in_action is checked: end_action() clears
             # _in_action under _cond before it settles self._goal and destroys the client.
@@ -1223,18 +1243,20 @@ class ArmInterface:
             t_end = time.monotonic() + timeout_s
             while not rf.done() and time.monotonic() < t_end and self._in_action:
                 if ctx.cancelled():
-                    self._cancel(gh)
-                    self._wait(rf, CANCEL_SETTLE_S)  # let the driver settle it
-                    ctx.checkpoint()  # raises the engine's Cancelled
+                    ctx.checkpoint()  # raises the engine's Cancelled: cancelled below
                 if monitor is not None and not self.monitor_stopped and monitor():
                     self.monitor_stopped = True
                     self._cancel(gh)  # the driver stops the arm, then settles PREEMPTED
                 time.sleep(POLL_S)
             if rf.done():
                 res = rf.result()
-        except KeyboardInterrupt:
+        except BaseException as e:
+            # Anything raised while the goal runs (a cancel, Ctrl-C, the monitor, a state read)
+            # must not leave it running: cancel it and let the driver settle it, then re-raise.
             self._cancel(gh)
-            self._node.get_logger().warning("  SheppyArm: Ctrl-C -- goal cancelled")
+            self._wait(rf, CANCEL_SETTLE_S)
+            if isinstance(e, KeyboardInterrupt):
+                self._node.get_logger().warning("  SheppyArm: Ctrl-C -- goal cancelled")
             raise
         finally:
             self._path_t0 = None
@@ -1341,15 +1363,16 @@ class ArmInterface:
         """The driver's /execute_joint_trajectory, every field: joints `names` through `points`,
         [(t from start s, positions, velocities), ...] sent as given (no timing or interpolation
         added). Tolerances: position (rad), one for all joints or one per joint; None leaves the
-        driver's default. `gains`: see impedance_gains(). `feedback`: called with each
+        driver's default. `gains`: see _impedance_gains(). `feedback`: called with each
         GoalFeedback on the executor (it must not block). Blocking; a cancel of the action
         cancels the goal and raises Cancelled, its end raises NotInAction. Raises ArmError when
-        the arm must not be commanded, the goal is refused or no result comes in time."""
+        the arm must not be commanded (EStopped when e-stopped), the goal is refused or no result
+        comes in time."""
         if speed_scale <= 0:
             self._fail(
                 ArmError, f"execute_joint_trajectory: speed_scale must be > 0, not {speed_scale}"
             )
-        gains = impedance_gains(gains)
+        gains = _impedance_gains(gains)
         self._checkpoint()
         if self._mock:  # the last point's joints become the state, when they are the arm's
             points, idx, q = list(points), _joint_index(names), None
@@ -1368,7 +1391,7 @@ class ArmInterface:
         self._check_command()
         why = self.not_ready()
         if why is not None:
-            self._fail(ArmError, f"execute_joint_trajectory: {why} -- nothing sent.")
+            self._fail(_refusal(why), f"execute_joint_trajectory: {why} -- nothing sent.")
         g = ExecuteJointTrajectory.Goal()
         g.trajectory.joint_names = list(names)
         duration = 0.0
@@ -1496,10 +1519,10 @@ class ArmInterface:
         return [Controller(c.name, list(c.channels), bool(c.available)) for c in res.controllers]
 
     def set_gains(self, gains) -> tuple[bool, str]:
-        """The session's default impedance gains (see impedance_gains()): (accepted, message)."""
+        """The session's default impedance gains (see _impedance_gains()): (accepted, message)."""
         if self._mock:
             return self._mock_sent("set_gains"), MOCK_NOT_SENT
-        req = SetGains.Request(spec=impedance_gains(gains))
+        req = SetGains.Request(spec=_impedance_gains(gains))
         token = self._driver.token
         if token is not None:
             req.token = list(token)
@@ -1540,8 +1563,10 @@ class ArmInterface:
     def _call(self, name, request):
         """Call service `name` and return its response: ArmError when the server is not up within
         SERVICE_WAIT_S or does not answer within SERVICE_CALL_S, NotInAction once the action
-        ends. Waits for no arm state."""
+        ends, Cancelled once it is cancelled (both waits poll every POLL_S). Waits for no arm
+        state."""
         self._ensure_open(wait_state=False)
+        ctx = self._ctx
         with self._open_lock:  # not while _destroy() empties the dict
             client = self._clients.get(name)
         if client is None:
@@ -1557,6 +1582,8 @@ class ArmInterface:
                 if client.service_is_ready():
                     future = client.call_async(request)
             if future is None:
+                if ctx.cancelled():
+                    ctx.checkpoint()  # raises the engine's Cancelled
                 if time.monotonic() > deadline:
                     self._fail(
                         ArmError, f"no {path} service in {SERVICE_WAIT_S:g} s -- is the driver up?"
@@ -1566,6 +1593,8 @@ class ArmInterface:
         while not future.done():
             if not self._in_action:
                 self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+            if ctx.cancelled():
+                ctx.checkpoint()  # raises the engine's Cancelled
             if time.monotonic() > deadline:
                 self._fail(ArmError, f"{path}: no answer in {SERVICE_CALL_S:g} s")
             time.sleep(POLL_S)
@@ -1577,14 +1606,14 @@ class ArmInterface:
     def stream(self, controller: str, gains=None, timeout_s=None):
         """A streaming session on `controller` (see list_controllers()): yields a Stream to send()
         setpoints on, at least every `timeout_s` (default STREAM_TIMEOUT_S). `gains` (see
-        impedance_gains()) apply to impedance controllers, at open. One session is one motion: a
+        _impedance_gains()) apply to impedance controllers, at open. One session is one motion: a
         pause is honoured at open only. Leaving the block, however (an exception, a cancel, the
         driver closing it), sends the hold setpoint (zeros for twist and velocity controllers, the
         measured pose or joints for pose and position ones; nothing for torque), closes the
         session and destroys its publisher. ModeConflict while a goal or another stream runs;
-        ArmError when the arm must not be commanded or the driver has no such controller
-        available. In mock mode the session opens and send() does nothing."""
-        gains = impedance_gains(gains)
+        ArmError when the arm must not be commanded (EStopped when e-stopped) or the driver has no
+        such controller available. In mock mode the session opens and send() does nothing."""
+        gains = _impedance_gains(gains)
         timeout_s = STREAM_TIMEOUT_S if timeout_s is None else timeout_s
         self._checkpoint()
         ctx, driver = self._ctx, self._driver
@@ -1595,7 +1624,7 @@ class ArmInterface:
         self._check_command()
         why = self.not_ready()
         if why is not None:
-            self._fail(ArmError, f"stream {controller!r}: {why} -- nothing sent.")
+            self._fail(_refusal(why), f"stream {controller!r}: {why} -- nothing sent.")
         try:
             driver.begin_stream(controller)
         except ModeConflict as e:

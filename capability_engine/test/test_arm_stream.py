@@ -1,3 +1,4 @@
+import threading
 import time
 
 import numpy as np
@@ -5,6 +6,7 @@ import pytest
 from fake_driver import FakeCtx, counts
 from rammp_arm_interfaces.msg import ImpedanceGains
 from rammp_curobo_interfaces.action import PlanToPose
+from rammp_curobo_interfaces.srv import SetWorld
 from rclpy.callback_groups import ReentrantCallbackGroup
 from sheppy_arm import JOINTS
 
@@ -12,6 +14,7 @@ from capability_engine import arm as arm_module
 from capability_engine.arm import HOLD_LEVEL, ArmInterface, Controller, Plan
 from capability_engine.driver_state import (
     ArmError,
+    EStopped,
     ModeConflict,
     NotInAction,
     StreamClosed,
@@ -22,6 +25,8 @@ TOKEN = b"\x03" * 16
 WAIT_S = 2.0  # how long a test waits for a message to reach the fake or the arm
 POLL_S = 0.01
 TWIST = np.ones(6) * 0.01
+CANCEL_AFTER_S = 0.3  # when a test cancels the action during a service call
+SLOW_ANSWER_S = 2.0  # how long the slow test service takes to answer (> CANCEL_AFTER_S)
 
 
 def wait_until(condition, timeout_s=WAIT_S):
@@ -162,7 +167,43 @@ def test_goal_during_stream_refused(arm_env):
     with arm.stream("ee_twist"):
         with pytest.raises(ModeConflict, match="ee_twist"):
             arm.go_to_joint_config([0.0] * 7)
+        assert "ee_twist" in arm.last_error  # refused through _fail, like stream()
     assert not fake.goals["go_to_joint_config"]
+
+
+def test_driver_api_raises_estopped(arm_env):
+    arm, _, fake = arm_env
+    fake.engage_estop()
+    arm.begin_action(FakeCtx(), TOKEN)
+    with pytest.raises(EStopped, match="arm is E-STOPPED -- clear it first"):
+        arm.execute_joint_trajectory(JOINTS, [(1.0, [0.1] * 7, [0.0] * 7)])
+    with pytest.raises(EStopped, match="arm is E-STOPPED -- clear it first"):
+        with arm.stream("ee_twist"):
+            pass
+    assert not fake.goals["execute_joint_trajectory"]
+    assert not fake.requests["open_stream"]
+
+
+@pytest.mark.parametrize("phase", ["server", "answer"])
+def test_cancel_during_service_call(arm_env, monkeypatch, phase):
+    """A cancel interrupts a service call waiting for its server, or for its answer."""
+    arm, node, _ = arm_env
+    path = f"/test_set_world_{phase}"
+    if phase == "answer":
+
+        def slow(request, response):
+            time.sleep(SLOW_ANSWER_S)
+            return response
+
+        node.create_service(SetWorld, path, slow, callback_group=ReentrantCallbackGroup())
+    monkeypatch.setitem(arm_module.SERVICES, "set_world", (SetWorld, path))
+    ctx = FakeCtx()
+    arm.begin_action(ctx, None)
+    threading.Timer(CANCEL_AFTER_S, ctx.cancel).start()
+    t0 = time.monotonic()
+    with pytest.raises(Cancelled):
+        arm.set_world("kitchen")
+    assert time.monotonic() - t0 < SLOW_ANSWER_S
 
 
 def test_stream_closed_by_driver_raises(arm_env):
@@ -297,8 +338,14 @@ def test_unusable_plan_fails(arm_env, names, velocities):
     arm.begin_action(FakeCtx(), None)
     plan = arm.plan_to_joints([0.1] * 7, [0.0] * 7)
     assert plan.success is False
-    assert names[0] in plan.message
+    assert plan.message == (
+        "plan_to_joints: the plan is not positions and velocities of arm_joint_1..7 or "
+        f"joint_1..7 at every point (its joints: {names})"
+    )
     assert plan.q.shape == (0, 7)
+    if not velocities:  # the same plan with velocities is fine: they were the failure
+        fake.plan_result([[0.0] * 7, [0.1] * 7], joint_names=names)
+        assert arm.plan_to_joints([0.1] * 7, [0.0] * 7).success
 
 
 def test_planner_and_estop_need_no_arm_state(arm_env):

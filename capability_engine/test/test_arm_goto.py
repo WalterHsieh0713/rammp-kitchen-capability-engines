@@ -131,6 +131,23 @@ def test_go_to_feedback_is_plain(arm_env):
     np.testing.assert_allclose(fb.actual, [0.1] * 7)
 
 
+def test_raising_feedback_callback_is_contained(arm_env):
+    """A feedback callback that raises is logged on the executor; the goal and the executor go
+    on (an exception escaping the callback would stop the executor's spin())."""
+    arm, _, fake = arm_env
+    fake.hold_goals(0.3)  # the goal runs long enough for its feedback to arrive
+    arm.begin_action(FakeCtx(), None)
+    calls = []
+
+    def feedback(fb):
+        calls.append(fb)
+        raise RuntimeError("bad callback")
+
+    assert arm.go_to_preset("home", feedback=feedback)
+    assert calls
+    assert arm.go_to_preset("home")  # the executor still spins
+
+
 def test_go_to_preset_home(arm_env):
     arm, _, fake = arm_env
     arm.begin_action(FakeCtx(), None)

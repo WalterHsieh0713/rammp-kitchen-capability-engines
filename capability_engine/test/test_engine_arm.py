@@ -33,6 +33,8 @@ ENGINE_ID = "arm_test_engine"
 TARGET = [0.3] * 7  # the joint target of the tests' moves
 STRUCTURE = {"JOINTS", "CONTINUOUS", "ERRORS", "IMPEDANCE"}  # sheppy_arm constants, not tunables
 CART_STEP = np.array([0.02, 0.0, 0.0])  # the mock Cartesian move: 2 cm along x
+PRE_STEP = np.array([0.0, 0.05, -0.05])  # the mock go_to_ee_pose: from the start to a line-up
+UNREACHABLE = [5.0, 0.0, 0.0]  # a tool position 5 m out: no IK solution
 SHORT_WAIT_S = 0.5  # STATE_WAIT_S in the test of a driver with no trajectory server
 
 
@@ -221,7 +223,7 @@ def test_sim_provider_uses_robot_description(env):
     engine = env.make(body)
     assert env.run(engine).status == Result.STATUS_SUCCESS
     assert seen["robot"].decode() == ET.parse(FLATBOT_URDF).getroot().get("name")
-    assert "driver model is live" in str(seen["explicit"])
+    assert "call it with no path" in str(seen["explicit"])
 
 
 def assert_destroyed(node, other):
@@ -342,6 +344,34 @@ def test_mock_tool_pose_from_sim(env):
     assert seen["robot"].decode() == ET.parse(FLATBOT_URDF).getroot().get("name")
     assert np.linalg.norm(seen["start"][:3]) > CART_STEP[0]  # not the no-model origin
     assert seen["moved"]
+    np.testing.assert_allclose(seen["ee"][:3], seen["target"], atol=sim.MAX_IK_ERR)
+    assert not any(env.fake.goals.values())
+
+
+def test_mock_go_to_ee_pose_then_move_cartesian(env):
+    """The spec's flow in mock: go_to_ee_pose moves the mock joints to the pose's IK solution,
+    so the move_cartesian after it starts there."""
+    seen = {}
+
+    def body(engine, ctx):
+        arm = engine.arm
+        ee = arm.get_state()["ee_pos"]
+        q0 = arm.raw_joints()
+        seen["unreachable"] = arm.go_to_ee_pose(UNREACHABLE, ee[3:])
+        seen["q_unreachable"], seen["q0"] = arm.raw_joints(), q0
+        pre = ee[:3] + PRE_STEP
+        seen["goto"] = arm.go_to_ee_pose(pre, ee[3:])
+        seen["at_pre"] = arm.get_state()["ee_pos"]
+        target = pre + CART_STEP
+        seen["moved"] = arm.move_cartesian([(target, ee[3:])])
+        seen["pre"], seen["target"], seen["ee"] = pre, target, arm.get_state()["ee_pos"]
+
+    engine = env.make(body, **{"mock": True, "arm.mock_urdf": str(FLATBOT_URDF)})
+    assert env.run(engine).status == Result.STATUS_SUCCESS
+    assert seen["unreachable"]  # a mock motion succeeds, but the joints stay
+    np.testing.assert_allclose(seen["q_unreachable"], seen["q0"])
+    assert seen["goto"] and seen["moved"]
+    np.testing.assert_allclose(seen["at_pre"][:3], seen["pre"], atol=sim.MAX_IK_ERR)
     np.testing.assert_allclose(seen["ee"][:3], seen["target"], atol=sim.MAX_IK_ERR)
     assert not any(env.fake.goals.values())
 

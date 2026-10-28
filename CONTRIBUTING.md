@@ -72,11 +72,31 @@ as the students' `SheppyArm` (`get_state`, `move_joints`, `move_cartesian`,
 they are sent. Use it inside `execute()`: the arm's ROS resources exist from the
 first arm call to the end of that `execute()`.
 
+**What a motion can raise.** `SheppyArm`'s methods return `False` for a refused
+or failed motion, an e-stop included, as they always did. On top of that, any
+motion can raise:
+
+- `Cancelled`: the orchestrator cancelled the action (the goal or stream is
+  stopped first);
+- `ControlTaken`: another sender took control of the arm mid-action;
+- `StreamClosed`: the driver closed your `stream(...)` session;
+- `NotInAction`: an arm call outside `execute()`, or `send()` outside its
+  `with` block;
+- `EStopped`: the driver API (`execute_joint_trajectory`, `stream`, `send`)
+  while the arm is e-stopped.
+
+Import them from the package, as in
+`from capability_engine import Cancelled, ControlTaken`. All but `Cancelled` are
+`ArmError`s.
+
 **Rules for the sim.** One sim per process, shared with `self.arm`, built from
 the driver's own model. These rules keep your checks and the arm in agreement:
 
 - Get the sim from `make_sim()` (`capability_engine.sim`). Never build your own
   PyBullet world or pass a different URDF while the driver is up.
+- Call `make_sim()` for the first time inside `execute()`: the model comes from
+  the driver through `self.arm`, which is only available in an action. Later
+  calls, anywhere, return the same copy.
 - If you checked joints, send joints (`move_joints`). If you send poses
   (`move_cartesian`), check them with `cartesian_knots` on the shared sim, not
   with your own IK: a different solver may land on different joints.
@@ -104,3 +124,7 @@ your capability. A test checks the example's fragment and table against
 driver, so no model: set `arm.mock_urdf` to the URDF file `make_sim()` should
 load (and `arm.mock_joints` for where the arm starts). Launch files take it as
 `mock_urdf:=/path/robot.urdf`; native runs can also use `--ros-args -p arm.mock_urdf:=...`.
+Two values are deliberately not in the fragment: `arm.sender_id` defaults to the
+engine id, and `sheppy_arm.IMPEDANCE` is the one `SheppyArm` value that is not an
+`arm.*` parameter at all, because it is only used when a caller passes it
+(`move_joints(..., impedance=IMPEDANCE)`).

@@ -16,17 +16,14 @@ JOINTS = [f"arm_joint_{i}" for i in range(1, 8)]
 CONTINUOUS = [0, 2, 4, 6]  # J1/J3/J5/J7 spin freely
 TOOL_Z = 0.120  # end_effector_link -> tool_frame (Kinova's 2F-85 tool, robot_controller/urdfs)
 DT = 0.02  # trajectory sample spacing (cuRobo's interpolation_dt)
-# rad/s peak for joint moves (~49 deg/s); was 0.35, 0.5 (10-07), 0.65 then 0.85 (10-24, "everything
-# felt slow")
+# rad/s peak for joint moves (~49 deg/s); was 0.35, 0.5 (10-07), 0.65 then 0.85 (10-24,
+# "everything felt slow")
 JOINT_SPEED = 0.85
 CART_SPEED = 0.16  # m/s peak for Cartesian paths; was 0.06, 0.09 (10-07), 0.12 then 0.16 (10-24)
 # Contact moves (the push-open into the door, the push-close push) CAN'T HANDLE MORE SPEED than
-# the 10-07
-# values below -- keep them there however fast the rest goes: at 0.65 rad/s / 0.12 m/s the push-
-# open's
-# last leg (door pushing back + a 68 deg hand turn) aborted PATH_TOLERANCE_VIOLATED (10-24); it
-# ran clean
-# three times at these.
+# the 10-07 values below -- keep them there however fast the rest goes: at 0.65 rad/s / 0.12 m/s
+# the push-open's last leg (door pushing back + a 68 deg hand turn) aborted
+# PATH_TOLERANCE_VIOLATED (10-24); it ran clean three times at these.
 CONTACT_JOINT_SPEED = 0.5
 CONTACT_CART_SPEED = 0.09
 
@@ -45,13 +42,10 @@ PATH_TOL_RAD = 0.15  # ~8.6 deg tracking guard per joint (driver-side abort)
 GRIPPER_FORCE = 0.5
 GRIPPER_SPEED = 0.5
 # Joint impedance for compliant moves (the door swing): the driver's documented teleop starting
-# point
-# (kinova-gen3-driver docs/guide/control-modes.md). In impedance mode lag ~ force (kq x lag), so
-# the path
-# tolerance doubles as a force stop. NOT USED for the door swing (scrapped 10-21): 0.08 rad
-# aborted just after
-# the latch; 0.30 rad let the arm swing wildly once the handle slipped out of the fingers
-# (e-stopped).
+# point (kinova-gen3-driver docs/guide/control-modes.md). In impedance mode lag ~ force
+# (kq x lag), so the path tolerance doubles as a force stop. NOT USED for the door swing
+# (scrapped 10-21): 0.08 rad aborted just after the latch; 0.30 rad let the arm swing wildly once
+# the handle slipped out of the fingers (e-stopped).
 IMPEDANCE = {
     "kq": (80.0, 80.0, 80.0, 80.0, 30.0, 30.0, 30.0),
     "zeta": 0.5,
@@ -69,15 +63,14 @@ ERRORS = {
     -9: "HALTED",
 }
 # go_to_ee_pose / go_to_joint_config (cuRobo in the driver). FRAME: what /ee_state reports and
-# the goal must be in
-# (arm_mount on the nightly driver). The goal pose is Kinova's tool_frame, = ee_pos here.
+# the goal must be in (arm_mount on the nightly driver). The goal pose is Kinova's tool_frame,
+# = ee_pos here.
 FRAME = "arm_mount"
 SENDER_ID = "microwave"
 # speed_scale of every go_to goal (1.0 = cuRobo's plan at the arm's full speed; the driver
-# refuses, not clamps,
-# values outside [0.01, 1]). button_press 10-14: at 1.0 a 51 cm move took 1.16 s and hit the
-# microwave cuRobo
-# can't see -- start slow here; the close script's --speed scales it too.
+# refuses, not clamps, values outside [0.01, 1]). button_press 10-14: at 1.0 a 51 cm move took
+# 1.16 s and hit the microwave cuRobo can't see -- start slow here; the close script's --speed
+# scales it too.
 GO_TO_SPEED_SCALE = 0.3
 GO_TO_TIMEOUT_S = 120.0  # planning + execution
 GO_TO_TRACK_M = 0.01  # go_to_ee_pose: tool this far from the goal at the end -> failed
@@ -232,9 +225,9 @@ class SheppyArm:
         ctx = _StandaloneCtx()
         self._arm.begin_action(ctx, token=None)
         self._owns_model = not sim_mod.has_model_provider()
-        if self._owns_model:
-            sim_mod.set_model_provider(self._arm.robot_description)
         try:
+            if self._owns_model:  # refused when the sim was built from a URDF path
+                sim_mod.set_model_provider(self._arm.robot_description)
             # As SheppyArm's constructor: wait for the arm's state, then the trajectory server
             # (polled in POLL_S slices by the arm's own wait).
             self._arm.get_state()

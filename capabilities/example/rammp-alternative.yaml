@@ -41,7 +41,6 @@ params:
   "arm.gripper_force": 0.5
   "arm.gripper_speed": 0.5
   "arm.frame": "arm_mount"
-  "arm.sender_id": "microwave"
   "arm.go_to_speed_scale": 0.3
   "arm.go_to_timeout_s": 120.0
   "arm.go_to_track_m": 0.01

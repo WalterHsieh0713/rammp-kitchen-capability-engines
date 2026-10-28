@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from fake_driver import FakeCtx
+from fake_driver import FakeCtx, counts
 from rammp_arm_interfaces.msg import ImpedanceGains
 from scipy.spatial.transform import Rotation as R
 from sheppy_arm import TOOL_Z
@@ -155,6 +155,22 @@ def test_monitor_cancel_counts_as_success(arm_env):
     assert arm.move_joints([[0.3] * 7], monitor=lambda: True) is True
     assert arm.monitor_stopped
     assert fake.cancelled("execute_joint_trajectory")
+
+
+def test_raising_monitor_cancels_the_goal(arm_env):
+    arm, node, fake = arm_env
+    fake.hold_goals(HOLD_S)  # without a cancel the goal would outlive the call
+    base = counts(node)
+    arm.begin_action(FakeCtx(), None)
+
+    def monitor():
+        raise RuntimeError("monitor failed")
+
+    with pytest.raises(RuntimeError, match="monitor failed"):
+        arm.move_joints([[0.3] * 7], monitor=monitor)
+    assert fake.cancelled("execute_joint_trajectory")  # by the motion, not end_action()
+    arm.end_action()
+    assert counts(node) == base
 
 
 def test_cancel_during_move_joints(arm_env):

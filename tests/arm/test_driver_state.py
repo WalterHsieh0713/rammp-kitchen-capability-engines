@@ -2,6 +2,8 @@
 
 import pytest
 
+import capability_engine
+from capability_engine import driver_state
 from capability_engine.driver_state import (
     ControlTaken,
     DriverState,
@@ -132,8 +134,15 @@ def test_not_ready_enforced_with_token():
     ds.set_token(TOKEN)
     status(ds, enforced=True, owned=True, owner="me")
     assert ds.not_ready("me") is None
-    status(ds, enforced=True, owned=True, owner="x")
-    assert ds.not_ready("me") == "the arm is owned by 'x'"
+    # The orchestrator acquires control under its own owner_id; the driver judges the token.
+    status(ds, enforced=True, owned=True, owner="orchestrator")
+    assert ds.not_ready("me") is None
+
+
+def test_exceptions_are_exported_from_the_package():
+    for name in ("ArmError", "ControlTaken", "EStopped", "NotInAction", "StreamClosed"):
+        assert name in capability_engine.__all__
+        assert getattr(capability_engine, name) is getattr(driver_state, name)
 
 
 def test_set_token_clears_control_taken():
