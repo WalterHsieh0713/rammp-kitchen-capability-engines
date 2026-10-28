@@ -14,10 +14,13 @@ action name in arm.py then fails the tests instead of being mirrored here. Test 
     state:        set_joints(q7), set_flange(pos, quat), set_gripper(pos), move_gripper_to(pos, s),
                   pause_publishing(), resume_publishing(), set_publish_rate(hz)
     arbitration:  enforce_arbitration(), seize(owner_id), engage_estop(status_delay_s=0.0)
-    goals:        accept(name, bool), set_result(name, code), set_result_after_cancel(name, code),
-                  hold_goals(seconds), finish_at(name, joints=None, flange=None), cancelled(name)
+    goals:        accept(name, bool), delay_accept(seconds), set_result(name, code),
+                  set_result_after_cancel(name, code), hold_goals(seconds),
+                  finish_at(name, joints=None, flange=None), cancelled(name)
     streams:      set_controllers([(name, channels, available)]), publish_stream_status(open)
     planner:      plan_result(points, joint_names=JOINTS)
+
+Every accepted driver goal (not the planner's) publishes one default feedback message as it starts.
 
 Also here: FakeCtx, which stands in for the engine's Context, and counts(node).
 """
@@ -187,6 +190,7 @@ class FakeDriver(Node):
         self._finish = {}
         self._cancelled = set()
         self._hold_s = 0.0
+        self._accept_delay_s = 0.0
         self._plan = None
         self._controllers = list(CONTROLLERS)
 
@@ -316,6 +320,10 @@ class FakeDriver(Node):
     def accept(self, name, accepted):
         self._accept[name] = bool(accepted)
 
+    def delay_accept(self, seconds):
+        """Goals are accepted or rejected this long after they arrive (default: at once)."""
+        self._accept_delay_s = float(seconds)
+
     def set_result(self, name, code):
         """The error_code a goal of `name` finishes with when not cancelled (default 0)."""
         self._results[name] = code
@@ -368,6 +376,7 @@ class FakeDriver(Node):
 
     def _on_goal(self, name, goal):
         self.goals[name].append(goal)
+        time.sleep(self._accept_delay_s)
         if not self._accept.get(name, True) or not self._authorized(goal):
             return GoalResponse.REJECT
         return GoalResponse.ACCEPT
@@ -378,6 +387,8 @@ class FakeDriver(Node):
 
     def _execute(self, name, handle):
         halts = self._halts
+        if name not in PLANNER_ACTIONS:
+            handle.publish_feedback(ACTIONS[name][0].Feedback())
         deadline = time.monotonic() + self._hold_s
         while (
             time.monotonic() < deadline and not handle.is_cancel_requested and self._halts == halts
