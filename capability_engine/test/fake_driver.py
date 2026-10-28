@@ -17,8 +17,9 @@ action name in arm.py then fails the tests instead of being mirrored here. Test 
     goals:        accept(name, bool), delay_accept(seconds), set_result(name, code, final_error),
                   set_result_after_cancel(name, code), hold_goals(seconds),
                   finish_at(name, joints=None, flange=None), cancelled(name)
-    streams:      set_controllers([(name, channels, available)]), publish_stream_status(open)
-    planner:      plan_result(points, joint_names=JOINTS)
+    streams:      set_controllers([(name, channels, available)]), publish_stream_status(open),
+                  late_close_on_next_open()
+    planner:      plan_result(points, joint_names=JOINTS, velocities=True)
 
 Every accepted driver goal (not the planner's) publishes one feedback message as it starts:
 fraction_complete FEEDBACK_FRACTION, actual = the joints, and on go_to goals phase "executing" and
@@ -79,6 +80,7 @@ DIAGNOSTICS_HZ = 1.0
 GOAL_POLL_S = 0.01  # how often a held goal checks for a cancel or a seize
 PLAN_DT_S = 0.1  # time between the points of a plan_result trajectory
 FEEDBACK_FRACTION = 0.5  # fraction_complete of the one feedback message a goal publishes
+LATE_CLOSE_S = 0.1  # late_close_on_next_open(): the "closed" lands this long before the open
 PAUSE_POLL_S = 0.01  # how often a paused FakeCtx.checkpoint() looks for resume or cancel
 FLATBOT_URDF = Path("/fixtures/urdf/flatbot.urdf")
 FRAME = "arm_mount"
@@ -197,6 +199,7 @@ class FakeDriver(Node):
         self._accept_delay_s = 0.0
         self._plan = None
         self._controllers = list(CONTROLLERS)
+        self._late_close = False
 
         self._js_pub = self.create_publisher(JointState, "/joint_states", qos_profile_sensor_data)
         self._ee_pub = self.create_publisher(EeState, "/ee_state", qos_profile_sensor_data)
@@ -356,6 +359,11 @@ class FakeDriver(Node):
         """What /list_controllers reports: [(name, channels, available), ...]."""
         self._controllers = [(n, list(c), bool(a)) for n, c, a in controllers]
 
+    def late_close_on_next_open(self):
+        """The next open_stream publishes /stream_status open=False just before it opens: the
+        late "closed" of the session before, which lands after the new stream began."""
+        self._late_close = True
+
     def publish_stream_status(self, open, controller="", channels=(), timeout_s=0.0):  # noqa: A002
         self._stream_pub.publish(
             StreamStatus(
@@ -363,8 +371,9 @@ class FakeDriver(Node):
             )
         )
 
-    def plan_result(self, trajectory_points, joint_names=JOINTS):
-        """What plan_to_pose / plan_to_joints return: points (position lists) PLAN_DT_S apart."""
+    def plan_result(self, trajectory_points, joint_names=JOINTS, velocities=True):
+        """What plan_to_pose / plan_to_joints return: points (position lists) PLAN_DT_S apart,
+        with zero velocities (none when `velocities` is False)."""
         traj = JointTrajectory(joint_names=list(joint_names))
         for i, positions in enumerate(trajectory_points):
             t = i * PLAN_DT_S
@@ -372,7 +381,7 @@ class FakeDriver(Node):
             traj.points.append(
                 JointTrajectoryPoint(
                     positions=[float(x) for x in positions],
-                    velocities=[0.0] * len(positions),
+                    velocities=[0.0] * len(positions) if velocities else [],
                     time_from_start=Duration(sec=sec, nanosec=round((t - sec) * 1e9)),
                 )
             )
@@ -446,6 +455,10 @@ class FakeDriver(Node):
             response.error_code = STREAM_REJECTED
             response.message = f"FakeDriver: refused controller {request.controller!r}"
             return response
+        if self._late_close:
+            self._late_close = False
+            self.publish_stream_status(False)
+            time.sleep(LATE_CLOSE_S)  # taken by the arm, not overwritten in its depth-1 queue
         response.accepted, response.channels = True, row[1]
         self.publish_stream_status(True, row[0], row[1], request.timeout_s)
         return response

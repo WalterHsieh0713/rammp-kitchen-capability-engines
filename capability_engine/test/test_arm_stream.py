@@ -178,6 +178,25 @@ def test_stream_closed_by_driver_raises(arm_env):
     assert arm._driver.mode == "idle"
 
 
+def test_late_close_of_the_last_session_is_ignored(arm_env):
+    """The driver closes session A; A's late "closed" lands after B began, before B opens."""
+    arm, _, fake = arm_env
+    arm.begin_action(FakeCtx(), None)
+    with pytest.raises(StreamClosed):
+        with arm.stream("ee_twist") as s:
+            fake.publish_stream_status(False)
+            wait_until(lambda: not arm.stream_status().open)
+            s.send(TWIST)
+    fake.late_close_on_next_open()
+    with arm.stream("ee_twist") as s:
+        wait_until(lambda: arm.stream_status().open)  # the late "closed" has come in before it
+        for _ in range(5):
+            s.send(TWIST)
+            time.sleep(POLL_S)
+        wait_until(lambda: twist_values(fake.setpoints["/setpoint/twist"][-1]) != [0.0] * 6)
+    assert len(fake.requests["open_stream"]) == 2
+
+
 def test_stream_cancel_zeroes_and_closes(arm_env):
     arm, _, fake = arm_env
     ctx = FakeCtx()
@@ -253,6 +272,46 @@ def test_plan_to_pose_round_trip(arm_env):
     assert g.hold == PlanToPose.Goal.HOLD_LEVEL
     p = g.target.position
     np.testing.assert_allclose([p.x, p.y, p.z], [0.4, 0.1, 0.3])
+
+
+def test_plan_with_planner_joint_names(arm_env):
+    """cuRobo's config names the joints joint_1..7; they map to arm_joint_1..7 by number."""
+    arm, _, fake = arm_env
+    q = np.arange(14.0).reshape(2, 7) / 10
+    order = [3, 4, 5, 6, 0, 1, 2]
+    fake.plan_result(q[:, order], joint_names=[f"joint_{i + 1}" for i in order])
+    arm.begin_action(FakeCtx(), None)
+    plan = arm.plan_to_joints([0.1] * 7, [0.0] * 7)
+    assert plan.success
+    np.testing.assert_allclose(plan.q, q)
+
+
+@pytest.mark.parametrize(
+    ("names", "velocities"),
+    [([f"j{i}" for i in range(1, 8)], True), (JOINTS, False)],
+    ids=["unknown_names", "no_velocities"],
+)
+def test_unusable_plan_fails(arm_env, names, velocities):
+    arm, _, fake = arm_env
+    fake.plan_result([[0.0] * 7, [0.1] * 7], joint_names=names, velocities=velocities)
+    arm.begin_action(FakeCtx(), None)
+    plan = arm.plan_to_joints([0.1] * 7, [0.0] * 7)
+    assert plan.success is False
+    assert names[0] in plan.message
+    assert plan.q.shape == (0, 7)
+
+
+def test_planner_and_estop_need_no_arm_state(arm_env):
+    """With no /joint_states, /ee_state or /gripper_state, both go out at once."""
+    arm, _, fake = arm_env
+    fake.pause_publishing()
+    fake.plan_result([[0.0] * 7, [0.1] * 7])
+    arm.begin_action(FakeCtx(), None)
+    t0 = time.monotonic()
+    arm.estop(True, "test")
+    assert arm.plan_to_joints([0.1] * 7, [0.0] * 7).success
+    assert time.monotonic() - t0 < WAIT_S  # far below STATE_WAIT_S
+    wait_until(lambda: fake.setpoints["/estop"])
 
 
 def test_plan_to_joints_and_failure(arm_env):

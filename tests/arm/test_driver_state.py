@@ -53,6 +53,7 @@ def test_mode_follows_begin_and_end():
 def test_stream_closed_unexpectedly():
     ds = DriverState()
     ds.begin_stream("ee_twist")
+    ds.on_stream_status(True)
     ds.on_stream_status(False)
     with pytest.raises(StreamClosed) as e:
         ds.check_command()
@@ -63,6 +64,15 @@ def test_stream_closed_unexpectedly():
 def test_stream_status_closed_without_stream_is_ignored():
     ds = DriverState()
     ds.on_stream_status(False)
+    ds.check_command()
+
+
+def test_late_close_before_the_stream_shows_open_is_ignored():
+    """A "closed" of the session before (late) lands after begin_stream, before the open."""
+    ds = DriverState()
+    ds.begin_stream("ee_twist")
+    ds.on_stream_status(False)
+    ds.on_stream_status(True)
     ds.check_command()
 
 
@@ -138,6 +148,7 @@ def test_set_token_clears_control_taken():
 def test_stream_closed_does_not_outlive_stream():
     ds = DriverState()
     ds.begin_stream("ee_twist")
+    ds.on_stream_status(True)
     ds.on_stream_status(False)
     ds.end_stream()
     ds.check_command()

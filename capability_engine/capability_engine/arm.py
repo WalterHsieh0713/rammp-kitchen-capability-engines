@@ -97,7 +97,6 @@ SERVICE_CALL_S = 10.0  # how long a service call waits for its answer (set_world
 STREAM_TIMEOUT_S = 0.1  # stream(): the driver closes the session after this long with no setpoint
 PUBLISHER_MATCH_S = 1.0  # how long a new setpoint or /estop publisher waits for the driver to
 # subscribe before its first message (DDS discovery), so that message is not lost
-STREAM_SETTLE_S = 0.5  # how long opening or closing a stream waits for /stream_status to show it
 CLOSE_STREAM_WAIT_S = 1.0  # how long closing a stream waits for /close_stream's answer
 CONTROL_FROM_ORCHESTRATOR_MESSAGE = "control comes from the orchestrator"
 STREAM_ENDED_MESSAGE = "the stream is closed: send() works only inside its with block"
@@ -320,13 +319,20 @@ def _seconds(d):
 
 
 def _plan(res):
-    """A planner's result as a Plan, its joints reordered to JOINTS; None when its joint names
-    are not JOINTS'."""
+    """A planner's result as a Plan, its joints reordered to JOINTS; None when its joints are
+    not arm_joint_1..7 or joint_1..7 (the sim's rule: cuRobo's config names them joint_<i>) or
+    a point lacks positions or velocities for them."""
     names = list(res.trajectory.joint_names)
-    if sorted(names) != sorted(JOINTS):
+    for fmt in ("arm_joint_{}", "joint_{}"):
+        wanted = [fmt.format(i) for i in range(1, len(JOINTS) + 1)]
+        if sorted(names) == sorted(wanted):
+            break
+    else:
         return None
-    idx = [names.index(n) for n in JOINTS]
+    idx = [names.index(n) for n in wanted]
     points = res.trajectory.points
+    if any(len(p.positions) != len(names) or len(p.velocities) != len(names) for p in points):
+        return None
     return Plan(
         True,
         res.message,
@@ -488,9 +494,9 @@ class Stream:
         self.controller = controller
         self.channel = channel  # the /setpoint/<channel> it publishes on
         self._arm = arm
-        self.ctx, self.driver, self.token = ctx, driver, driver.token
-        self.pub = None  # created before open_stream, destroyed when the session closes
-        self.opened = False  # the driver accepted open_stream
+        self._ctx, self._driver, self._token = ctx, driver, driver.token
+        self._pub = None  # created before open_stream, destroyed when the session closes
+        self._opened = False  # the driver accepted open_stream
 
     def send(self, setpoint):
         """Send one setpoint: 7 joints for joint controllers, (pos, quat xyzw) of /ee_state's frame
@@ -500,11 +506,11 @@ class Stream:
         NotInAction outside the with block; leaving the block then zeroes and closes the session."""
         self._arm._send_setpoint(self, setpoint)
 
-    def message(self, value):
+    def _message(self, value):
         """`value` as this session's setpoint message, with the token; None for a wrong shape."""
         m = _setpoint(self.channel, value)
-        if m is not None and self.token is not None:
-            m.token = list(self.token)
+        if m is not None and self._token is not None:
+            m.token = list(self._token)
         return m
 
 
@@ -548,8 +554,8 @@ class ArmInterface:
         """End the action: settle any goal or stream, destroy every ROS entity _open() made and
         forget the state they received, so the next action starts from the driver afresh.
         Worst case, it waits GOAL_ACCEPT_S + CANCEL_SETTLE_S for a goal the driver has not yet
-        answered, to accept it and then to settle its cancel, or CLOSE_STREAM_WAIT_S +
-        STREAM_SETTLE_S for a stream to close."""
+        answered, to accept it and then to settle its cancel, or CLOSE_STREAM_WAIT_S for a stream
+        to close."""
         with self._cond:
             self._in_action = False
             self._cond.notify_all()  # a call waiting for state wakes with NotInAction
@@ -583,17 +589,23 @@ class ArmInterface:
         if not self._in_action:
             self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
 
-    def _ensure_open(self):
+    def _ensure_open(self, wait_state=True):
+        """Create the arm's entities on the first call in an action, and (`wait_state`) wait for
+        the arm's state; the e-stop, the planner and the services need none. The wait is outside
+        _open_lock, so a call that needs no state is never held up by one that waits."""
         self._check_in_action()
         with self._open_lock:
             # Again under the lock: end_action() may have destroyed everything since the check.
             if not self._in_action:
                 self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-            if not self._opened:
+            opened_now = not self._opened
+            if opened_now:
                 self._open()
+        if opened_now and wait_state and not all(self._wait_for(t) for t in MOTION_STATE):
+            self._fail(StateTimeout, NO_STATE_MESSAGE)
 
     def _open(self):
-        """Create the subscriptions, clients and publishers, then wait for the arm's state."""
+        """Create the subscriptions, clients and publishers."""
         with self._cond:
             self._latest.clear()
         node = self._node
@@ -623,8 +635,6 @@ class ArmInterface:
         )
         self._pubs["/estop"] = node.create_publisher(EStop, "/estop", ESTOP_QOS)
         self._opened = True
-        if not all(self._wait_for(t) for t in MOTION_STATE):
-            self._fail(StateTimeout, NO_STATE_MESSAGE)
 
     def _destroy(self):
         if self._gate is not None:
@@ -1319,7 +1329,7 @@ class ArmInterface:
         return res.success, res.message
 
     def _plan_goal(self, name, g):
-        self._check_in_action()
+        self._ensure_open(wait_state=False)  # the planner needs no arm state
         ctx = self._ctx
         client = self._action(name)
         path = ACTIONS[name][1]
@@ -1357,7 +1367,10 @@ class ArmInterface:
         plan = _plan(res)
         if plan is None:
             names = list(res.trajectory.joint_names)
-            self._refuse(f"{name}: the plan's joints are {names}, not {JOINTS}")
+            self._refuse(
+                f"{name}: the plan is not positions and velocities of arm_joint_1..7 or "
+                f"joint_1..7 at every point (its joints: {names})"
+            )
             return Plan(False, self.last_error)
         return plan
 
@@ -1411,8 +1424,8 @@ class ArmInterface:
     def _call(self, name, request):
         """Call service `name` and return its response: ArmError when the server is not up within
         SERVICE_WAIT_S or does not answer within SERVICE_CALL_S, NotInAction once the action
-        ends."""
-        self._ensure_open()
+        ends. Waits for no arm state."""
+        self._ensure_open(wait_state=False)
         with self._open_lock:  # not while _destroy() empties the dict
             client = self._clients.get(name)
         if client is None:
@@ -1461,8 +1474,6 @@ class ArmInterface:
         why = self.not_ready()
         if why is not None:
             self._fail(ArmError, f"stream {controller!r}: {why} -- nothing sent.")
-        # The latched /stream_status in before the session begins: its "closed" must not end it.
-        self._wait_for("/stream_status")
         try:
             driver.begin_stream(controller)
         except ModeConflict as e:
@@ -1471,27 +1482,28 @@ class ArmInterface:
         try:
             stream = self._new_stream(controller, ctx, driver)
             req = OpenStream.Request(controller=controller, timeout_s=float(timeout_s), gains=gains)
-            if stream.token is not None:
-                req.token = list(stream.token)
+            if stream._token is not None:
+                req.token = list(stream._token)
             res = self._call("open_stream", req)
             if not res.accepted:
                 self._fail(
                     ArmError,
                     f"stream {controller!r}: refused ({res.error_code}) {res.message}",
                 )
-            stream.opened = True
+            stream._opened = True
             if list(res.channels) != [stream.channel]:
                 self._fail(
                     ArmError,
                     f"stream {controller!r}: opened on {list(res.channels)}, not "
                     f"[{stream.channel!r}] as /list_controllers said",
                 )
-            self._stream_shown(True, STREAM_SETTLE_S)
             yield stream
         finally:
-            if stream is not None:
-                self._close_stream(stream)
-            driver.end_stream()
+            try:
+                if stream is not None:
+                    self._close_stream(stream)
+            finally:
+                driver.end_stream()
 
     def _new_stream(self, controller, ctx, driver):
         """A Stream on `controller`'s channel, its publisher made and matched (the driver's
@@ -1518,60 +1530,58 @@ class ArmInterface:
                 self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
             msg_type = SETPOINTS[stream.channel][0]
             topic = f"/setpoint/{stream.channel}"
-            stream.pub = self._node.create_publisher(msg_type, topic, SETPOINT_QOS)
+            stream._pub = self._node.create_publisher(msg_type, topic, SETPOINT_QOS)
             self._stream = stream
-        _wait_matched(stream.pub)
+        self._wait_matched(stream._pub)
         return stream
 
     def _send_setpoint(self, stream, setpoint):
         if self._stream is not stream:  # closed already: the block outlived it, or its action
             self._fail(NotInAction, STREAM_ENDED_MESSAGE)
-        if stream.ctx.cancelled():
-            stream.ctx.checkpoint()  # raises the engine's Cancelled; the block's exit closes
+        if stream._ctx.cancelled():
+            stream._ctx.checkpoint()  # raises the engine's Cancelled; the block's exit closes
         try:
-            stream.driver.check_command()
+            stream._driver.check_command()
         except ArmError as e:
             self._fail(type(e), str(e))
-        m = stream.message(setpoint)
+        m = stream._message(setpoint)
         if m is None:
             self._fail(
                 ArmError,
                 f"stream {stream.controller!r}: a {stream.channel} setpoint is "
                 f"{SETPOINTS[stream.channel][1]}, not {setpoint!r}",
             )
-        with self._open_lock:  # not while the session closes and destroys `pub`
+        with self._open_lock:  # not while the session closes and destroys its publisher
             if self._stream is not stream:
                 self._fail(NotInAction, STREAM_ENDED_MESSAGE)
-            stream.pub.publish(m)
+            stream._pub.publish(m)
 
     def _close_stream(self, stream):
         """Send the hold setpoint, close the session at the driver and destroy its publisher,
         once: on leaving the stream's block, or in end_action() (_settle), whichever comes first.
-        Stored handles only; waits at most CLOSE_STREAM_WAIT_S + STREAM_SETTLE_S."""
+        Stored handles only; waits at most CLOSE_STREAM_WAIT_S."""
         with self._open_lock:  # not while _destroy() destroys the close_stream client
             if self._stream is not stream:
                 return
             self._stream = None
             try:
-                if stream.opened:
+                if stream._opened:
                     hold = self._hold_setpoint(stream.channel)
                     if hold is not None:
-                        stream.pub.publish(stream.message(hold))
+                        stream._pub.publish(stream._message(hold))
                     req = CloseStream.Request()
-                    if stream.token is not None:
-                        req.token = list(stream.token)
+                    if stream._token is not None:
+                        req.token = list(stream._token)
                     res = self._wait(
                         self._clients["close_stream"].call_async(req), CLOSE_STREAM_WAIT_S
                     )
-                    if res is None or not res.closed:
-                        why = "no answer" if res is None else res.message
-                        self._node.get_logger().warning(
-                            f"stream {stream.controller!r}: /close_stream: {why}"
-                        )
-                    # Its "closed" in before the next session begins.
-                    self._stream_shown(False, STREAM_SETTLE_S)
+                    log = self._node.get_logger()
+                    if res is None:
+                        log.warning(f"stream {stream.controller!r}: /close_stream: no answer")
+                    elif not res.closed:  # the driver had closed it already
+                        log.debug(f"stream {stream.controller!r}: /close_stream: {res.message}")
             finally:
-                self._node.destroy_publisher(stream.pub)
+                self._node.destroy_publisher(stream._pub)
 
     def _hold_setpoint(self, channel):
         """What holds the arm as a session closes: zeros for twist and velocity, the latest
@@ -1588,37 +1598,36 @@ class ArmInterface:
                 return self._latest["/joint_states"][0].position
         return None
 
-    def _stream_shown(self, is_open, timeout_s):
-        """Whether /stream_status shows a session open (or closed), waiting up to `timeout_s`."""
-
-        def shown():
-            latest = self._latest.get("/stream_status")
-            return latest is not None and latest[0].open == is_open
-
-        with self._cond:
-            return self._cond.wait_for(shown, timeout_s)
+    def _wait_matched(self, pub):
+        """Wait up to PUBLISHER_MATCH_S for `pub`, one of this action's publishers, to have a
+        subscriber. NotInAction once the action ends (end_action() then destroys `pub`)."""
+        deadline = time.monotonic() + PUBLISHER_MATCH_S
+        while True:
+            # Under _cond: end_action() clears _in_action under it before it destroys `pub`.
+            with self._cond:
+                if not self._in_action:
+                    self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
+                if pub.get_subscription_count() > 0:
+                    return
+            if time.monotonic() > deadline:
+                return
+            time.sleep(POLL_S)
 
     # -- e-stop ----------------------------------------------------------------------------------
 
     def estop(self, engaged: bool, reason: str):
-        """Engage (True) or clear (False) the e-stop on /estop, as this capability's node."""
-        self._ensure_open()
+        """Engage (True) or clear (False) the e-stop on /estop, as this capability's node. Sent at
+        once: it waits for no arm state, only (up to PUBLISHER_MATCH_S) for a subscriber."""
+        self._ensure_open(wait_state=False)
         m = EStop(engaged=bool(engaged), source=self._node.get_name(), reason=reason)
         m.header.stamp = self._node.get_clock().now().to_msg()
         with self._open_lock:  # after _ensure_open() has made it
             pub = self._pubs.get("/estop")
         if pub is None:
             self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
-        _wait_matched(pub)
+        self._wait_matched(pub)
         # Under _cond: end_action() clears _in_action under it before it destroys `pub`.
         with self._cond:
             if not self._in_action:
                 self._fail(NotInAction, NOT_IN_ACTION_MESSAGE)
             pub.publish(m)
-
-
-def _wait_matched(pub):
-    """Wait up to PUBLISHER_MATCH_S for `pub` to have a subscriber."""
-    deadline = time.monotonic() + PUBLISHER_MATCH_S
-    while pub.get_subscription_count() == 0 and time.monotonic() < deadline:
-        time.sleep(POLL_S)

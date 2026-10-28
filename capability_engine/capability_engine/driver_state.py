@@ -55,6 +55,7 @@ class DriverState:
         self._generation = None
         self._control_taken_by = None  # set when the generation changed under our token
         self._stream_closed = False
+        self._stream_seen_open = False  # /stream_status showed this stream's session open
 
     @property
     def mode(self):
@@ -91,12 +92,12 @@ class DriverState:
                     f"cannot start {mode} {name!r}: {self._mode} {self._running!r} is running"
                 )
             self._mode, self._running = mode, name
-            self._stream_closed = False
+            self._stream_closed = self._stream_seen_open = False
 
     def _end(self):
         with self._lock:
             self._mode, self._running = "idle", ""
-            self._stream_closed = False
+            self._stream_closed = self._stream_seen_open = False
 
     def on_control_status(self, estopped, arbitration_enabled, owned, owner_id, generation):
         with self._lock:
@@ -115,8 +116,14 @@ class DriverState:
                 self._control_taken_by = self._status[3] if self._status else ""
 
     def on_stream_status(self, open):  # noqa: A002 (the driver's field name)
+        """A "closed" counts only once this stream's session has shown open: one arriving before
+        that is a late status of the session before it."""
         with self._lock:
-            if not open and self._mode == "stream":
+            if self._mode != "stream":
+                return
+            if open:
+                self._stream_seen_open = True
+            elif self._stream_seen_open:
                 self._stream_closed = True
 
     def not_ready(self, sender_id):
