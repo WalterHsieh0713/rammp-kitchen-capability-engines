@@ -48,7 +48,7 @@ params:
   scene_camera_info_topic: /scene_camera/color/camera_info
   scene_depth_topic: /scene_camera/depth/image_rect_raw
   # The grasp point along the approach from the brim's outer edge (m; negative: short of it).
-  grasp_depth_m: -0.003
+  grasp_depth_m: -0.008
   # New frames whose brim edges must agree.
   detect_frames: 5
   # Where grab starts (rad, arm_joint_1..7 as /joint_states reports them).
@@ -71,7 +71,7 @@ params:
   "arm.gripper_force": 0.5
   "arm.gripper_speed": 0.5
   "arm.frame": "arm_mount"
-  "arm.go_to_speed_scale": 0.3
+  "arm.go_to_speed_scale": 0.8
   "arm.go_to_timeout_s": 120.0
   "arm.go_to_track_m": 0.01
   "arm.go_to_track_deg": 2.0

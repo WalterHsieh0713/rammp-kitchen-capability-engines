@@ -19,16 +19,22 @@ and holds it a little above where it stood. `grab`:
 1. **Grasp:** YOLO segments the brim, and a circle fit of the mask's outline on
    the brim's plane gives its outer edge. 5 new frames must each fit the brim's
    radius (8.43 cm, within 3 mm) and agree on the edge to 5 mm. The grasp point
-   is 3 mm short of the edge, facing the approach. Then it opens the gripper,
-   moves to a pre-grasp 10 cm back, moves in, closes and raises 6 cm.
+   is 8 mm short of the edge, facing the approach. Then it opens the gripper and
+   approaches in one motion (`self.arm.go_through`): from the view, past a
+   pre-grasp 10 cm back (its corner cut by up to 2 cm, no stop), and in to the
+   rim keeping the gripper's tilt (`HOLD_LEVEL`). It closes, and raises 6 cm,
+   turning the gripper level with the world.
 
 ![The wrist camera's frames with the old point (red X, on the inner edge) and the
 fitted brim (cyan) and its outer edge (green); a rejected partial view; and the
 two points' jitter over 157 still frames](ring_detection.jpg)
 
-The detector loads in the background while the arm moves, so detection takes
-about 0.3 s. Every move is a cuRobo move through `self.arm`, in stiff position
-control or, with `impedance`, on the driver's joint impedance controller.
+The detector loads in the background from the node's start, so detection takes
+about 0.6 s, the first time too. Every move is a cuRobo move through `self.arm`,
+in stiff position control or, with `impedance`, on the driver's joint impedance
+controller: the free-space moves at `arm.go_to_speed_scale` (0.8 in the real
+fragment), the approach at 0.6. The approach needs a planner with
+`/rammp_curobo/plan_through` (RAMMP-CuRobo#47).
 `park` sends the arm to the scan pose by a direct joint move, which works when
 cuRobo refuses the start state; it is not collision-checked. A failed check
 stops the action with the arm holding where it is. It is activated when the
@@ -106,7 +112,7 @@ passes them as a params file.
 | `scene_color_topic`       | `"/scene_camera/color/image_raw"`                           | Scene camera colour                                                                  |
 | `scene_camera_info_topic` | `"/scene_camera/color/camera_info"`                         | Its intrinsics                                                                       |
 | `scene_depth_topic`       | `"/scene_camera/depth/image_rect_raw"`                      | Scene depth aligned to colour (mm)                                                   |
-| `grasp_depth_m`           | `-0.003`                                                    | Grasp point along the approach from the brim's outer edge (m; negative: short of it) |
+| `grasp_depth_m`           | `-0.008`                                                    | Grasp point along the approach from the brim's outer edge (m; negative: short of it) |
 | `detect_frames`           | `5`                                                         | New frames whose brim edges must agree                                               |
 | `home_joints`             | `[0.067, -1.8971, -3.137, -2.2691, -0.211, -0.6831, 1.725]` | Where `grab` starts (rad, `arm_joint_1..7`)                                          |
 | `impedance_gains`         | `"default"`                                                 | The driver's impedance profile for `impedance` goals: default, soft, medium, stiff   |

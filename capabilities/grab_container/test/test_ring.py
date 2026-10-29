@@ -6,6 +6,7 @@ import types
 
 import numpy as np
 import pytest
+from scipy.spatial.transform import Rotation
 
 from grab_container import grasp
 
@@ -127,7 +128,7 @@ def test_detect_ring_refuses_frames_that_disagree():
 
 
 class FakeArm:
-    """self.arm for grasp.grab: records each go_to_ee_pose's keyword arguments."""
+    """self.arm for grasp.grab: records each move's label, waypoints and keyword arguments."""
 
     last_error = ""
 
@@ -140,14 +141,24 @@ class FakeArm:
     def gripper(self, *a, **kw):
         return True
 
+    def go_through(self, waypoints, label, speed_scale=None, **kw):
+        self.moves.append((label, list(waypoints), speed_scale, kw))
+        return True
+
     def go_to_ee_pose(self, pos, quat, label, **kw):
-        self.moves.append((label, kw))
+        self.moves.append((label, quat, kw))
         return True
 
 
-def test_grab_runs_every_move_with_the_motion_arguments():
+def test_grab_approaches_in_one_motion_and_raises_level():
     cam, arm = FakeCamera(frames([CENTRE] * grasp.N_FRAMES)), FakeArm()
     motion = {"control_mode": 1, "gains": "medium"}
-    out = grasp.grab(arm, cam, FakeModel(cam), True, lambda s: None, lambda *a: None, **motion)
+    out = grasp.grab(arm, cam, FakeModel(cam), True, lambda s: None, lambda *a: None, 1, **motion)
     assert out["raised"]
-    assert arm.moves == [(name, motion) for name in ("pre-grasp", "grasp", "raise")]
+    (label, (pre, at), speed, kw), (raise_label, quat, raise_kw) = arm.moves
+    assert (label, speed, kw) == ("approach", grasp.APPROACH_SPEED_SCALE, motion)
+    assert (pre.blend_radius, at.blend_radius) == (grasp.BLEND_M, 0.0)  # cut the pre-grasp corner
+    assert (pre.hold, at.hold) == (0, 1)  # the hold on the pre-grasp -> rim leg only
+    assert (raise_label, raise_kw) == ("raise", motion)
+    approach = Rotation.from_quat(quat).as_matrix()[:, 2]
+    assert approach[2] == pytest.approx(0.0, abs=1e-9)  # level with the world

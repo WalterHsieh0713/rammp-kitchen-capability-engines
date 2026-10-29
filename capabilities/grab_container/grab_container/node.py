@@ -6,9 +6,10 @@ Action `grab`:
      camera's depth give a coarse position.
   2. view (scene.view_pose): the wrist camera moves above the container, on the approach side.
   3. grasp (grasp.grab): the students' YOLO brim detector and a circle fit find the grasp point,
-     then open, pre-grasp, grasp, close and raise a little, holding it.
-The detector loads in the background from the start of the action, while the arm moves. Every move
-is a cuRobo move (self.arm.go_to_*); the goal's `impedance` runs them all on the driver's joint
+     then open, approach (view -> pre-grasp -> grasp in one motion, self.arm.go_through), close and
+     raise a little with the gripper turned level, holding it.
+The detector loads in the background from the node's start. Every move is a cuRobo move
+(self.arm.go_to_* / go_through); the goal's `impedance` runs them all on the driver's joint
 impedance controller (`impedance_gains`) instead of stiff position control. Action `park`: the scan
 pose by a direct joint move, for when cuRobo refuses the start state. A failed check stops the run
 with the arm holding where it is (EngineError "refused").
@@ -26,7 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import rammp_arm
 from capability_engine import Action, CapabilityEngine, EngineError, run
-from capability_engine.arm import IMPEDANCE
+from capability_engine.arm import HOLD_LEVEL, IMPEDANCE
 
 from . import grasp, scene
 
@@ -68,7 +69,9 @@ class Capability(CapabilityEngine):
     def __init__(self, **node_kwargs):
         super().__init__("grab_container", **node_kwargs)
         self.cfg = {name: self.declare_parameter(name, default).value for name, default in PARAMS.items()}
-        self.model = None  # the detector's loading (a Future), started by the first grab
+        # the detector's loading (a Future): from startup, so the first grab finds it warm; a grab
+        # starts it again after a failed load
+        self.model = None if self.mock else ThreadPoolExecutor(1).submit(self._load_model)
         grasp.GRASP_DEPTH_M = self.cfg["grasp_depth_m"]
         grasp.N_FRAMES = self.cfg["detect_frames"]
         self.get_logger().info(
@@ -84,7 +87,7 @@ class Capability(CapabilityEngine):
             return {"executed": False, "mock": True}
 
         log = self.get_logger().info
-        if action_id == "grab" and self.model is None:  # load it while the arm moves home and to the view
+        if action_id == "grab" and self.model is None:  # a failed load: again, while the arm moves
             self.model = ThreadPoolExecutor(1).submit(self._load_model)
         try:
             if action_id == "park":
@@ -134,7 +137,7 @@ class Capability(CapabilityEngine):
         if not self.arm.go_to_ee_pose(pos, quat, "view", **motion):
             raise grasp.Abort(f"view: {self.arm.last_error} -- HOLDING HERE")
         log(f"wrist image turned {90 * wrist.set_upright()} deg for the detector (world up = image up)")
-        return {**located, **grasp.grab(self.arm, wrist, self._model(), True, log, ctx.progress, **motion)}
+        return {**located, **grasp.grab(self.arm, wrist, self._model(), True, log, ctx.progress, HOLD_LEVEL, **motion)}
 
     def _camera(self, color_topic, info_topic, depth_topic, frame=""):
         from .camera import Camera

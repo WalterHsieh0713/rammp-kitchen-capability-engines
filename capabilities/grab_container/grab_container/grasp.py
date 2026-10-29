@@ -24,6 +24,7 @@ from collections import Counter
 
 import cv2
 import numpy as np
+from capability_engine.arm import Waypoint
 from scipy.spatial.transform import Rotation
 
 GRAB_CLASS = "grabber"
@@ -42,8 +43,9 @@ FINGER_ROLL_DEG = 90.0  # roll the fingers about the approach axis. If they come
 # Fine-nudge the grasp target off the detected point, BASE frame [dx, dy, dz] meters (z up).
 GRASP_OFFSET_BASE = np.array([0.0, 0.0, 0.0])
 # The tool point along the approach from the brim's outer edge (negative: short of it). On the
-# flatbot 2026-10-28, -0.003 grasped cleanly and +0.003 went too deep.
-GRASP_DEPTH_M = -0.003
+# flatbot 2026-10-28, -0.003 grasped cleanly and +0.003 went too deep; on 2026-10-29 -0.003
+# still bumped the container's inside.
+GRASP_DEPTH_M = -0.008
 
 STANDOFF_M = 0.10
 RAISE_M = 0.06
@@ -65,6 +67,8 @@ GRIP_CLOSE = 1.0  # CLOSE stalls on the ring at the force ceiling
 GRIP_SPEED = 1.0
 GRIP_FORCE = 0.5  # force = motor-current ceiling, not a force setpoint
 GRIP_SETTLE_S = 2.0
+BLEND_M = 0.02  # view -> pre-grasp -> grasp is one motion (go_through): the pre-grasp corner cut
+APPROACH_SPEED_SCALE = 0.6  # that approach's speed_scale; the free-space moves run at arm.go_to_speed_scale
 
 # Custom scan pose, captured from /joint_states (already in RADIANS — no np.radians()).
 # Camera looks at the box; joints are mid-range (joint 4 off its limit). To change it:
@@ -197,10 +201,23 @@ def grasp_targets(p_detected):
     return pre, p_base, p_base + np.array([0, 0, RAISE_M]), R
 
 
-def grab(arm, camera, model, execute, log, progress, **motion):
-    """Detect the ring, then open, pre-grasp, grasp, close and raise. Dry run (`execute` False):
-    detect and plan every leg with cuRobo, nothing moves. `motion`: go_to_ee_pose's keyword arguments
-    for every move (control_mode, gains). Returns the result payload."""
+def level(R):
+    """`R` turned about a horizontal axis until its approach (tool z) is horizontal: the raise
+    ends with the gripper level with the world (the held container turns with it)."""
+    a = R[:, 2]
+    k = np.cross(a, [a[0], a[1], 0.0])
+    if np.linalg.norm(k) < 1e-9:  # already level
+        return R
+    angle = np.arcsin(abs(a[2]))
+    return Rotation.from_rotvec(k / np.linalg.norm(k) * angle).as_matrix() @ R
+
+
+def grab(arm, camera, model, execute, log, progress, grasp_hold=0, **motion):
+    """Detect the ring, then open, approach (view -> pre-grasp -> grasp as one motion, the
+    pre-grasp corner blended), close, and raise with the gripper turned level. Dry run (`execute`
+    False): detect and plan the approach and the raise with cuRobo, nothing moves. `motion`: the
+    moves' keyword arguments (control_mode, gains). `grasp_hold`: the grasp waypoint's hold
+    (HOLD_*), the pre-grasp -> rim leg (default 0, HOLD_NONE). Returns the result payload."""
     why = arm.not_ready()
     if why is not None:
         raise Abort(why)
@@ -219,26 +236,31 @@ def grab(arm, camera, model, execute, log, progress, **motion):
         "approach": R[:, 2].tolist(),
         "ring": ring,
     }
-    legs = [("pre-grasp", pre), ("grasp", p_grasp), ("raise", p_raise)]
+    quat_raise = Rotation.from_matrix(level(R)).as_quat()
+    through = [
+        Waypoint(pos=tuple(pre), quat=tuple(quat), blend_radius=BLEND_M),
+        Waypoint(pos=tuple(p_grasp), quat=tuple(quat), hold=grasp_hold),
+    ]
 
     if not execute:
-        start = arm.raw_joints()
-        for i, (name, p) in enumerate(legs):
-            progress(name, 100.0 * (i + 1) / (len(legs) + 1), "dry run: planning")
-            plan = arm.plan_to_pose(p, quat, start)
-            if not plan.success:
-                raise Abort(f"{name}: cuRobo found no path ({plan.message}) -- arm not commanded")
-            log(f"{name:16s} cuRobo {len(plan.t):3d} pts  {plan.t[-1]:.1f} s")
-            start = plan.q[-1]  # the next leg starts where this one ends
+        progress("approach", 30.0, "dry run: planning")
+        plan = arm.plan_through(through, arm.raw_joints())
+        if not plan.success:
+            raise Abort(f"approach: cuRobo found no path ({plan.message}) -- arm not commanded")
+        log(f"approach         cuRobo {len(plan.t):3d} pts  {plan.t[-1]:.1f} s")
+        progress("raise", 70.0, "dry run: planning")
+        plan = arm.plan_to_pose(p_raise, quat_raise, plan.q[-1])  # from where the approach ends
+        if not plan.success:
+            raise Abort(f"raise: cuRobo found no path ({plan.message}) -- arm not commanded")
+        log(f"raise            cuRobo {len(plan.t):3d} pts  {plan.t[-1]:.1f} s")
         log("DRY: planned only")
         return result
 
     progress("grasp", 10.0, "opening")
     arm.gripper(GRIP_OPEN, timeout_s=GRIP_SETTLE_S, force=GRIP_FORCE, speed=GRIP_SPEED)
-    for name, p in legs[:2]:
-        progress(name, 30.0 if name == "pre-grasp" else 50.0)
-        if not arm.go_to_ee_pose(p, quat, name, **motion):
-            raise Abort(f"{name}: {arm.last_error} -- HOLDING HERE")
+    progress("approach", 30.0, "view -> pre-grasp -> grasp, one motion")
+    if not arm.go_through(through, "approach", APPROACH_SPEED_SCALE, **motion):
+        raise Abort(f"approach: {arm.last_error} -- HOLDING HERE")
     progress("grasp", 70.0, "closing")
     arm.gripper(GRIP_CLOSE, timeout_s=GRIP_SETTLE_S, force=GRIP_FORCE, speed=GRIP_SPEED)
 
@@ -246,7 +268,7 @@ def grab(arm, camera, model, execute, log, progress, **motion):
     # the wrist camera moves with the arm, so a re-detect after lifting isn't
     # reliable -- we just lift a little and keep the grip, confirm by eye.
     progress("raise", 85.0)
-    result["raised"] = arm.go_to_ee_pose(p_raise, quat, "raise", **motion)
+    result["raised"] = arm.go_to_ee_pose(p_raise, quat_raise, "raise", **motion)
     log("raised + holding" if result["raised"] else f"raise skipped ({arm.last_error}) -- holding in place")
     return result
 
