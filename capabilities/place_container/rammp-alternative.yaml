@@ -43,10 +43,20 @@ params:
   settle_s: 3.0
   # Contact more than this (m) above where the bottom meets the table = not the table.
   early_stop: 0.03
-  # The driver's impedance profile for the lowering, hold, retreat and reset: default, soft, medium or stiff.
-  impedance_gains: medium
-  # speed_scale of the carrying moves (go_to_ee_pose).
-  go_to_speed_scale: 0.2
+  # Joint impedance for the settle, lowering, hold, retreat and reset (one set: the stiffness never changes
+  # mid-place). The driver's documented starting point, not the "medium" profile RAMMP-table used.
+  impedance_kq: [80.0, 80.0, 80.0, 80.0, 30.0, 30.0, 30.0]
+  impedance_zeta: 0.5
+  impedance_torque_limit: [39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0]
+  # Speeds. The hand's speed where the table should be (m/s): what the contact test was tuned at.
+  lower_speed: 0.02
+  # The rest is 2x RAMMP-table's: speed_scale of the carrying moves (go_to_ee_pose),
+  go_to_speed_scale: 0.4
+  # of the squaring turn and of reset's joint moves (move_joints),
+  adjust_speed_scale: 1.0
+  reset_speed_scale: 1.0
+  # and the retreat's peak speed (m/s).
+  retreat_speed: 0.06
   # Spot distance from the arm base axis (m) with the full descent (flatbot, table z 0.198).
   reach: [0.70, 1.10]
   # The squaring turn may correct at most this much (deg).

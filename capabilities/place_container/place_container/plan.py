@@ -373,3 +373,46 @@ class VzContact:
         self.moved = self.moved or vz < -self.moving
         self.count = self.count + 1 if self.moved and vz >= self.stop else 0
         return self.count >= self.need
+
+
+# self.arm.move_joints times a path minimum-jerk over its whole length (rammp_arm.joint_trajectory):
+# at time fraction u the hand is minjerk_distance(u) of the way along, at minjerk_speed(u) x the
+# average speed. The descent is one such move, so it is slow at both ends.
+CONTACT_GATE = 0.75  # contact counts only while the commanded speed is at least this x lower_speed
+MAX_PEAK = 1.5  # the descent's peak speed is at most this x lower_speed
+
+
+def minjerk_distance(u):
+    u = min(max(u, 0.0), 1.0)
+    return 10 * u**3 - 15 * u**4 + 6 * u**5
+
+
+def minjerk_speed(u):
+    u = min(max(u, 0.0), 1.0)
+    return 30 * u**2 * (1 - u) ** 2
+
+
+def minjerk_time(d):
+    """The time fraction at which a minimum-jerk move is fraction d of the way along."""
+    lo, hi = 0.0, 1.0
+    for _ in range(50):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if minjerk_distance(mid) < d else (lo, mid)
+    return (lo + hi) / 2
+
+
+def descent_speed_scale(meet, lower_speed, cart_speed):
+    """move_joints' speed_scale for the line down so the hand passes `meet` (0..1 of the way, where
+    the table should be) at lower_speed, the speed the contact test was tuned at (RAMMP-table: a
+    steady 2 cm/s). Its peak speed is cart_speed x the scale (joint_trajectory), at most
+    MAX_PEAK x lower_speed."""
+    u = minjerk_time(min(max(meet, 0.05), 0.95))
+    peak = min(lower_speed / (minjerk_speed(u) / minjerk_speed(0.5)), MAX_PEAK * lower_speed)
+    return peak / cart_speed
+
+
+def contact_gate(u, length, duration, lower_speed):
+    """Whether contact may be called at time fraction u of the descent: the commanded speed is up
+    (at the start and end of a minimum-jerk move it is slow, and a hand that slows with its command
+    must not read as stopped by the table)."""
+    return 0.0 < u < 1.0 and minjerk_speed(u) * length / duration >= CONTACT_GATE * lower_speed

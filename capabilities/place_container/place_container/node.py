@@ -29,6 +29,7 @@ import time
 from pathlib import Path
 
 import numpy as np
+import rammp_arm
 from capability_engine import Action, CapabilityEngine, EngineError, run
 from capability_engine.arm import HOLD_LEVEL
 from scipy.spatial.transform import Rotation
@@ -50,11 +51,24 @@ PARAMS = {
     "settle_s": 3.0,
     # contact more than this (m) above where the bottom meets the table = not the table
     "early_stop": 0.03,
-    # the driver's impedance profile for the lowering, hold, retreat and reset: default, soft, medium, stiff
-    # (soft sagged ~3 cm, 2026-10-08)
-    "impedance_gains": "medium",
-    # speed_scale of the carrying moves (go_to_ee_pose)
-    "go_to_speed_scale": 0.2,
+    # joint impedance for the settle, lowering, hold, retreat and reset, one set so the stiffness never
+    # changes mid-place (move_joints takes custom gains, not the driver's named profiles). Default: the
+    # driver's documented starting point (rammp_arm.IMPEDANCE), NOT the "medium" profile RAMMP-table
+    # used -- compare the settle's sag in the recording (medium: 1.0 cm on the flatbot, 2026-10-26)
+    "impedance_kq": list(rammp_arm.IMPEDANCE["kq"]),
+    "impedance_zeta": rammp_arm.IMPEDANCE["zeta"],
+    "impedance_torque_limit": list(rammp_arm.IMPEDANCE["torque_limit"]),
+    # speeds. The lowering stays at the 2 cm/s its contact test was tuned at; the rest is 2x RAMMP-table's
+    # (2026-10-29): the hand's speed where the table should be (m/s)
+    "lower_speed": 0.02,
+    # speed_scale of the carrying moves (go_to_ee_pose; was 0.2)
+    "go_to_speed_scale": 0.4,
+    # speed_scale of the squaring turn (move_joints; was 0.5)
+    "adjust_speed_scale": 1.0,
+    # the retreat's peak speed (m/s; was 0.03)
+    "retreat_speed": 0.06,
+    # speed_scale of reset's joint moves (move_joints; was ~0.5)
+    "reset_speed_scale": 1.0,
     # spot distance from the arm base axis (m) where the whole place plans with the full descent
     # (flatbot, table z 0.198: test_place_bowl.py --sweep); outside it the plan still decides
     "reach": [0.70, 1.10],
@@ -97,6 +111,11 @@ class Capability(CapabilityEngine):
     def __init__(self, **node_kwargs):
         super().__init__("place_container", **node_kwargs)
         self.cfg = {name: self.declare_parameter(name, default).value for name, default in PARAMS.items()}
+        self.cfg["gains"] = {
+            "kq": [float(v) for v in self.cfg["impedance_kq"]],
+            "zeta": float(self.cfg["impedance_zeta"]),
+            "torque_limit": [float(v) for v in self.cfg["impedance_torque_limit"]],
+        }
         self.state_dir = Path(self.cfg["state_dir"])
         self.get_logger().info(
             f"allow_execute={self.cfg['allow_execute']}: "
@@ -161,7 +180,7 @@ class Capability(CapabilityEngine):
             if name.startswith("adjust"):
                 # a small turn in place: our checked joint move (cuRobo swung the hand sideways and back
                 # for it, 2026-10-08)
-                ok = self.arm.move_joints([q], speed_scale=0.5)
+                ok = self.arm.move_joints([q], speed_scale=self.cfg["adjust_speed_scale"])
             else:
                 T = model.fk(q)
                 log(f"-> {name} (go_to_ee_pose, level, speed x{self.cfg['go_to_speed_scale']})")
@@ -273,7 +292,7 @@ class Capability(CapabilityEngine):
             )
         zs = descent[0]
         log(
-            f"lower      one move at {lower.SLIDE_SPEED * 100:.0f} cm/s from z={zs[0]:.3f} "
+            f"lower      one move (~{self.cfg['lower_speed'] * 100:.0f} cm/s at the table) from z={zs[0]:.3f} "
             f"down to at most {zs[-1]:.3f} "
             f"({(zs[0] - zs[-1]) * 100:.0f} cm), stopping when it feels the table"
         )

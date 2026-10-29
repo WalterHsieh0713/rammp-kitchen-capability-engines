@@ -87,6 +87,29 @@ def test_vz_contact_needs_the_hand_to_have_moved_down():
     assert not any(c.update(v) for v in [0.0, -0.002, 0.001, 0.0, 0.0])  # settling, never moving
 
 
+def test_descent_passes_the_table_at_the_tuned_speed():
+    """move_joints times the line minimum-jerk; the scale puts 2 cm/s where the table should be."""
+    cart_speed, lower = 0.16, 0.02
+    for meet in (0.4, 0.69, 0.8):  # 0.69: 30 cm above the table to 10 cm below where the bottom meets it
+        scale = plan.descent_speed_scale(meet, lower, cart_speed)
+        peak = cart_speed * scale  # joint_trajectory: peak speed = CART_SPEED x speed_scale
+        u = plan.minjerk_time(meet)
+        assert plan.minjerk_distance(u) == pytest.approx(meet, abs=1e-6)
+        assert peak * plan.minjerk_speed(u) / plan.minjerk_speed(0.5) == pytest.approx(lower, rel=1e-3)
+        assert peak <= plan.MAX_PEAK * lower
+
+
+def test_contact_counts_only_while_the_command_is_moving():
+    length, lower = 0.32, 0.02
+    scale = plan.descent_speed_scale(0.69, lower, 0.16)
+    duration = 1.875 * length / (0.16 * scale)  # joint_trajectory's duration for a Cartesian line
+    gate = [plan.contact_gate(u, length, duration, lower) for u in np.linspace(0, 1, 101)]
+    assert not gate[0] and not gate[10] and not gate[95] and not gate[100]  # slow start and end
+    assert gate[50] and plan.contact_gate(plan.minjerk_time(0.69), length, duration, lower)  # at the table
+    open_ = [plan.minjerk_distance(u) for u, g in zip(np.linspace(0, 1, 101), gate, strict=True) if g]
+    assert min(open_) < 0.2 and max(open_) > 0.8  # the table may be ~15 cm higher or ~3 cm lower than marked
+
+
 # -- on the flatbot model ---------------------------------------------------------------------
 
 

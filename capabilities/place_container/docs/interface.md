@@ -62,24 +62,30 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file. The defaults are the flatbot's (2026-10-26).
 
-| Name                | Default                     | Meaning                                                                     |
-| ------------------- | --------------------------- | --------------------------------------------------------------------------- |
-| `use_orchestrator`  | `true`                      | `false` runs standalone: no registration, drive it by CLI                   |
-| `mock`              | `false`                     | `true` skips hardware (the mock alternative sets it)                        |
-| `allow_execute`     | `false`                     | The arm moves only with this and `execute`; attended runs only              |
-| `flange_to_tip`     | `0.17955`                   | Flange face to the closed fingertips (m); not ruler-measured on the flatbot |
-| `pitch_deg`         | `5.0`                       | The hand points this many deg down while placing                            |
-| `vz_stop`           | `-0.01`                     | Contact: the hand's z velocity back up to this (m/s, + up)                  |
-| `hold_press`        | `0.003`                     | The hold after contact, this far below the contact point (m)                |
-| `settle_s`          | `3.0`                       | Held in impedance at the start this long before going down (s)              |
-| `early_stop`        | `0.03`                      | Contact more than this above where the bottom meets the table: refused (m)  |
-| `impedance_gains`   | `"medium"`                  | The driver's impedance profile: default, soft, medium or stiff              |
-| `go_to_speed_scale` | `0.2`                       | speed_scale of the carrying moves                                           |
-| `reach`             | `[0.7, 1.1]`                | Spot distance from the arm base axis with the full descent (m)              |
-| `max_adjust_deg`    | `15.0`                      | Largest squaring turn (deg)                                                 |
-| `max_spot_age_min`  | `30.0`                      | A marked spot older than this is refused (min)                              |
-| `tool_frame_tol`    | `0.015`                     | The arm's tool frame vs the model's (m)                                     |
-| `state_dir`         | `"/config/place_container"` | Where the marked spot, start position and descent recordings are kept       |
+| Name                     | Default                                      | Meaning                                                                     |
+| ------------------------ | -------------------------------------------- | --------------------------------------------------------------------------- |
+| `use_orchestrator`       | `true`                                       | `false` runs standalone: no registration, drive it by CLI                   |
+| `mock`                   | `false`                                      | `true` skips hardware (the mock alternative sets it)                        |
+| `allow_execute`          | `false`                                      | The arm moves only with this and `execute`; attended runs only              |
+| `flange_to_tip`          | `0.17955`                                    | Flange face to the closed fingertips (m); not ruler-measured on the flatbot |
+| `pitch_deg`              | `5.0`                                        | The hand points this many deg down while placing                            |
+| `vz_stop`                | `-0.01`                                      | Contact: the hand's z velocity back up to this (m/s, + up)                  |
+| `hold_press`             | `0.003`                                      | The hold after contact, this far below the contact point (m)                |
+| `settle_s`               | `3.0`                                        | Held in impedance at the start this long before going down (s)              |
+| `early_stop`             | `0.03`                                       | Contact more than this above where the bottom meets the table: refused (m)  |
+| `impedance_kq`           | `[80.0, 80.0, 80.0, 80.0, 30.0, 30.0, 30.0]` | Joint stiffness of every impedance move, J1..J7                             |
+| `impedance_zeta`         | `0.5`                                        | Damping ratio of every impedance move                                       |
+| `impedance_torque_limit` | `[39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0]`    | Torque limit of every impedance move (Nm), J1..J7                           |
+| `lower_speed`            | `0.02`                                       | The hand's speed where the table should be (m/s): the contact test's speed  |
+| `go_to_speed_scale`      | `0.4`                                        | speed_scale of the carrying moves (2x RAMMP-table's)                        |
+| `adjust_speed_scale`     | `1.0`                                        | speed_scale of the squaring turn (2x)                                       |
+| `retreat_speed`          | `0.06`                                       | The retreat's peak speed (m/s; 2x)                                          |
+| `reset_speed_scale`      | `1.0`                                        | speed_scale of reset's joint moves (2x)                                     |
+| `reach`                  | `[0.7, 1.1]`                                 | Spot distance from the arm base axis with the full descent (m)              |
+| `max_adjust_deg`         | `15.0`                                       | Largest squaring turn (deg)                                                 |
+| `max_spot_age_min`       | `30.0`                                       | A marked spot older than this is refused (min)                              |
+| `tool_frame_tol`         | `0.015`                                      | The arm's tool frame vs the model's (m)                                     |
+| `state_dir`              | `"/config/place_container"`                  | Where the marked spot, start position and descent recordings are kept       |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other; `arm.mock_urdf` names the
