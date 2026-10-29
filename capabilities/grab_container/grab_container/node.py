@@ -1,22 +1,21 @@
-"""The grab_container capability: grab the food container (tupperware) by its sleeve ring.
+"""The grab_container capability: grab the food container (tupperware) by its brim.
 
 Action `grab`:
   0. home: a cuRobo move to `home_joints`, where every run starts.
-  1. locate (scene.locate_container): the scene segmenter's food-container mask + the scene
-     camera's depth -> a coarse position in the arm's frame.
-  2. view (scene.view_pose): a cuRobo move of the wrist camera to above the container, on the
-     approach side, looking at it.
-  3. grasp (grasp.grab): the students' ring detector on the wrist camera (YOLO segmentation) and a
-     circle fit of the brim (N frames must agree), then open, pre-grasp, grasp, close and raise a
-     little, holding it. The detector loads and warms up in the background from the start of the
-     action, while the arm moves.
-Every move is a cuRobo move (self.arm.go_to_ee_pose). Action `park`: the scan pose by a direct
-joint move, for when cuRobo refuses the start state. Any failed check stops the run with the arm
-holding where it is (EngineError "refused").
+  1. locate (scene.locate_container): the scene segmenter's food-container mask and the scene
+     camera's depth give a coarse position.
+  2. view (scene.view_pose): the wrist camera moves above the container, on the approach side.
+  3. grasp (grasp.grab): the students' YOLO brim detector and a circle fit find the grasp point,
+     then open, pre-grasp, grasp, close and raise a little, holding it.
+The detector loads in the background from the start of the action, while the arm moves. Every move
+is a cuRobo move (self.arm.go_to_*); the goal's `impedance` runs them all on the driver's joint
+impedance controller (`impedance_gains`) instead of stiff position control. Action `park`: the scan
+pose by a direct joint move, for when cuRobo refuses the start state. A failed check stops the run
+with the arm holding where it is (EngineError "refused").
 
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets
 `execute`. Otherwise the goal is a dry run (grab: locate and plan the view move; park: report the
-move) and nothing moves. Someone stands at the e-stop whenever allow_execute is on.
+move). Someone stands at the e-stop whenever allow_execute is on.
 
     ros2 launch grab_container grab_container.launch.py use_orchestrator:=false
     make action CAP=grab_container ACTION=grab PARAMS='{"execute": false}'
@@ -27,6 +26,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 import rammp_arm
 from capability_engine import Action, CapabilityEngine, EngineError, run
+from capability_engine.arm import IMPEDANCE
 
 from . import grasp, scene
 
@@ -49,8 +49,11 @@ PARAMS = {
     # where grab starts (rad, arm_joint_1..7, as /joint_states reports them): the flatbot's, read
     # 2026-10-28 with the arm at home
     "home_joints": [0.067, -1.8971, -3.137, -2.2691, -0.211, -0.6831, 1.725],
+    # the driver's impedance profile for `impedance` goals: default, soft, medium or stiff
+    "impedance_gains": "default",
 }
 EXECUTE = {"type": "object", "properties": {"execute": {"type": "boolean", "default": False}}}
+GRAB = {"type": "object", "properties": {**EXECUTE["properties"], "impedance": {"type": "boolean", "default": False}}}
 
 
 class Capability(CapabilityEngine):
@@ -58,14 +61,14 @@ class Capability(CapabilityEngine):
     perception_classes = ["container"]
     required_resources = ["arm", "gripper"]
     actions = [
-        Action("grab", "Grab the container", params_schema=EXECUTE),
+        Action("grab", "Grab the container", params_schema=GRAB),
         Action("park", "Park at the scan pose", params_schema=EXECUTE),
     ]
 
     def __init__(self, **node_kwargs):
         super().__init__("grab_container", **node_kwargs)
         self.cfg = {name: self.declare_parameter(name, default).value for name, default in PARAMS.items()}
-        self.model = None  # the YOLO model's loading (a Future), started by the first grab
+        self.model = None  # the detector's loading (a Future), started by the first grab
         grasp.GRASP_DEPTH_M = self.cfg["grasp_depth_m"]
         grasp.N_FRAMES = self.cfg["detect_frames"]
         self.get_logger().info(
@@ -88,11 +91,12 @@ class Capability(CapabilityEngine):
                 return {**grasp.park(self.arm, execute, log), "note": note}
             # the cameras' and detections' subscriptions live only while the action runs
             cfg = self.cfg
+            motion = {"control_mode": IMPEDANCE, "gains": cfg["impedance_gains"]} if params.get("impedance") else {}
             wrist = self._camera(cfg["color_topic"], cfg["camera_info_topic"], cfg["depth_topic"], cfg["camera_frame"])
             scene_cam = self._camera(cfg["scene_color_topic"], cfg["scene_camera_info_topic"], cfg["scene_depth_topic"])
             detections = scene.SceneDetections(self, cfg["detections_topic"])
             try:
-                return {**self._grab(wrist, scene_cam, detections, execute, log, ctx), "note": note}
+                return {**self._grab(wrist, scene_cam, detections, execute, log, ctx, motion), "note": note}
             finally:
                 detections.close()
                 scene_cam.close()
@@ -100,14 +104,14 @@ class Capability(CapabilityEngine):
         except grasp.Abort as e:
             raise EngineError("refused", f"{e} -- the arm holds where it is", recoverable=True) from e
 
-    def _grab(self, wrist, scene_cam, detections, execute, log, ctx):
+    def _grab(self, wrist, scene_cam, detections, execute, log, ctx, motion):
         why = self.arm.not_ready()
         if why is not None:
             raise grasp.Abort(why)
         home = self.cfg["home_joints"]
         if execute:
             ctx.progress("home", 0.0)
-            if not self.arm.go_to_joint_config(home, "home"):
+            if not self.arm.go_to_joint_config(home, "home", **motion):
                 raise grasp.Abort(f"home: {self.arm.last_error} -- HOLDING HERE")
         else:
             plan = self.arm.plan_to_joints(home, self.arm.raw_joints())
@@ -127,10 +131,10 @@ class Capability(CapabilityEngine):
             log("DRY: located and planned the view only (the grasp is detected from the view)")
             return {"executed": False, **located}
         ctx.progress("view", 5.0)
-        if not self.arm.go_to_ee_pose(pos, quat, "view"):
+        if not self.arm.go_to_ee_pose(pos, quat, "view", **motion):
             raise grasp.Abort(f"view: {self.arm.last_error} -- HOLDING HERE")
         log(f"wrist image turned {90 * wrist.set_upright()} deg for the detector (world up = image up)")
-        return {**located, **grasp.grab(self.arm, wrist, self._model(), True, log, ctx.progress)}
+        return {**located, **grasp.grab(self.arm, wrist, self._model(), True, log, ctx.progress, **motion)}
 
     def _camera(self, color_topic, info_topic, depth_topic, frame=""):
         from .camera import Camera
@@ -145,8 +149,8 @@ class Capability(CapabilityEngine):
             raise
 
     def _load_model(self):
-        """The detector, loaded and run once on each image shape it will see (the wrist image turned
-        upright or not): the first inference initialises CUDA and takes seconds."""
+        """The detector, run once on each image shape it will see (turned or not): the first inference
+        initialises CUDA and takes seconds."""
         from ultralytics import YOLO
 
         model = YOLO(self.cfg["model_path"])

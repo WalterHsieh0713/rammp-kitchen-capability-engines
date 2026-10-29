@@ -49,8 +49,12 @@ params:
   scene_depth_topic: /scene_camera/depth/image_rect_raw
   # The grasp point along the approach from the brim's outer edge (m; negative: short of it).
   grasp_depth_m: -0.003
+  # New frames whose brim edges must agree.
+  detect_frames: 5
   # Where grab starts (rad, arm_joint_1..7 as /joint_states reports them).
   home_joints: [0.067, -1.8971, -3.137, -2.2691, -0.211, -0.6831, 1.725]
+  # The driver's impedance profile for `impedance` goals: default, soft, medium or stiff.
+  impedance_gains: default
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02

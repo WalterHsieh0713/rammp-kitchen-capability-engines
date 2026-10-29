@@ -1,8 +1,8 @@
-"""Grab the tupperware by the protruding sleeve ring, on self.arm.
+"""Grab the tupperware by its brim, on self.arm.
 
 Ported from dhyi-svg/feeding-deployment@8f5a3352 (rammp_grasp_tupperware/grasp_tupperware.py and
-park.py), which ran on the button press's RammpArm. The detection, the grasp geometry and every
-tuned value are copied unchanged; only the arm calls moved:
+park.py), which ran on the button press's RammpArm. The grasp geometry is the students'; the arm
+calls moved:
 
     RammpArm(execute, acquire_control) / take_control()   -> self.arm (the orchestrator's token)
     arm.status() problems                                  -> self.arm.not_ready()
@@ -12,17 +12,17 @@ tuned value are copied unchanged; only the arm calls moved:
     park: min-jerk joint trajectory via arm._send()        -> self.arm.move_joints()
     base_link                                              -> rammp_arm.FRAME (arm_mount)
 
-GRASP TARGET: the grabber is the container's flat brim, a RING. The students took the near rim as
-the nearest-depth slice of the ring mask. On the flatbot's OAK that slice is the brim's inner edge
-(stereo depth on the thin black brim bleeds in from the container wall) and it wanders 2-4 cm
-along the rim from frame to frame, so the grasp depth changed with every placement. Instead
-(detect_ring): the brim's height from the mask's depth, the mask's outer outline cast onto that
-plane, and a circle fit. The outer edge facing the approach is then exact to ~2 mm, and the fitted
-radius must be the brim's own (RING_RADIUS_M), which rejects partial or wrong masks.
+The grasp point is new. The students took the nearest-depth slice of the brim's mask. On the
+flatbot's OAK that is the brim's inner edge (depth on the thin black brim bleeds in from the
+container wall), and it wanders 1-4 cm between frames. detect_ring fits a circle to the mask's
+outline on the brim's plane instead: the outer edge facing the approach holds to ~2 mm, and the
+radius must be the brim's (RING_RADIUS_M), which rejects partial and wrong masks.
 """
 
 import time
+from collections import Counter
 
+import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation
 
@@ -41,21 +41,21 @@ FINGER_ROLL_DEG = 90.0  # roll the fingers about the approach axis. If they come
 #   the WRONG way (side-by-side instead of top/bottom), set this to 90.
 # Fine-nudge the grasp target off the detected point, BASE frame [dx, dy, dz] meters (z up).
 GRASP_OFFSET_BASE = np.array([0.0, 0.0, 0.0])
-# The tool point along the approach from the brim's outer edge (negative: short of it). From the
-# bags: -0.003 grasped cleanly (20261028_192107), +0.003 went too deep.
+# The tool point along the approach from the brim's outer edge (negative: short of it). On the
+# flatbot 2026-10-28, -0.003 grasped cleanly and +0.003 went too deep.
 GRASP_DEPTH_M = -0.003
 
 STANDOFF_M = 0.10
 RAISE_M = 0.06
 
 N_FRAMES = 5
-AGREE_M = 0.005  # the frames' outer edges agree to this (a still arm's spread: ~2 mm)
+AGREE_M = 0.005  # the frames' outer edges agree to this (a still arm: ~2 mm)
 CONF = 0.5
 DEPTH_MIN = 0.2
 DEPTH_MAX = 2.0
 MIN_PTS = 30
-RING_RADIUS_M = 0.0843  # the brim's outer radius (the bags' views: 8.40-8.46 cm)
-RADIUS_TOL_M = 0.003  # a frame's fit off by more is a partial or wrong mask (good views: +-0.6 mm)
+RING_RADIUS_M = 0.0843  # the brim's outer radius (measured: 8.40-8.46 cm)
+RADIUS_TOL_M = 0.003  # a fit off by more is a partial or wrong mask
 FIT_RMS_M = 0.004  # the outline's rms distance from its circle (good views: 1.5-2 mm)
 DETECT_TIMEOUT_S = 3.0  # N_FRAMES good frames within this, or grab refuses
 
@@ -97,8 +97,6 @@ def fit_circle(xy):
 def ring_in_frame(m, dm, K, R, t):
     """The brim from one frame's ring mask `m` and depth `dm` (metres), the camera's intrinsics K and
     pose (R, t) in the base frame: (centre xy, outer radius, height, fit rms), or a reason string."""
-    import cv2
-
     fx, fy, cx, cy = K
     ys, xs = np.nonzero(m)
     z = dm[ys, xs]
@@ -108,9 +106,10 @@ def ring_in_frame(m, dm, K, R, t):
     xs, ys, z = xs[ok], ys[ok], z[ok]
     P = np.stack([(xs - cx) * z / fx, (ys - cy) * z / fy, z], axis=1)
     h = float(np.median((P @ R.T + t)[:, 2]))  # the brim is flat: one height, robust to its noisy depth
+    # The convex hull is the outer edge: the mask's ring is often broken, and its contour then runs
+    # round the inner edge too.
     contours, _ = cv2.findContours(m.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    uv = cv2.convexHull(np.vstack(contours))[:, 0, :].astype(float)  # the outer edge only: the mask's ring
-    # is usually broken somewhere, and its contour then runs round the inner edge too
+    uv = cv2.convexHull(np.vstack(contours))[:, 0, :].astype(float)
     rays = np.stack([(uv[:, 0] - cx) / fx, (uv[:, 1] - cy) / fy, np.ones(len(uv))], axis=1) @ R.T
     if np.any(rays[:, 2] >= 0):
         return "outline above the horizon"
@@ -122,14 +121,13 @@ def ring_in_frame(m, dm, K, R, t):
     return c, r, h, rms
 
 
-def detect_ring(camera, model, log=None):
-    """The brim, agreed by N_FRAMES new frames: its outer edge facing the approach (base frame) and the
-    numbers that back it. Raises Abort when the ring is not seen, fits badly, or the frames disagree."""
-    a = grasp_orientation()[:, 2]
-    a = np.array([a[0], a[1], 0.0]) / np.linalg.norm(a[:2])  # the approach, horizontal
-    color = camera.get("color")
-    after = camera.stamp_of(color) if color is not None else None  # only frames taken after this call
-    rings, confs, why = [], [], {}
+def detect_ring(camera, model):
+    """The brim's outer edge facing the approach (base frame), agreed by N_FRAMES new frames, and the
+    numbers behind it. Abort when the ring is not seen, fits badly, or the frames disagree."""
+    a = grasp_orientation()[:2, 2]
+    a /= np.linalg.norm(a)  # the approach, horizontal
+    rings, confs, rejected = [], [], Counter()
+    after = None
     deadline = time.monotonic() + DETECT_TIMEOUT_S
     while len(rings) < N_FRAMES and time.monotonic() < deadline:
         frame = camera.frame(deadline - time.monotonic(), after)
@@ -141,43 +139,31 @@ def detect_ring(camera, model, log=None):
         classes = [] if r.masks is None else r.boxes.cls.tolist()
         idx = [i for i, c in enumerate(classes) if r.names[int(c)] == GRAB_CLASS]
         if not idx:
-            why["no ring detected"] = why.get("no ring detected", 0) + 1
+            rejected["no ring detected"] += 1
             continue
         best = max(idx, key=lambda i: float(r.boxes.conf[i]))
-        m = r.masks.data[best].cpu().numpy() > 0.5
-        if m.shape != dm.shape:
-            import cv2
-
-            m = cv2.resize(m.astype(np.uint8), dm.shape[::-1], interpolation=cv2.INTER_NEAREST) > 0
+        m = r.masks.data[best].cpu().numpy() > 0.5  # retina_masks: the image's size, as is the depth
         ring = ring_in_frame(m, dm, camera.intrinsics(), *camera.pose_in_base(camera.stamp))
         if isinstance(ring, str):
-            why[ring] = why.get(ring, 0) + 1
+            rejected[ring] += 1
             continue
         rings.append(ring)
         confs.append(float(r.boxes.conf[best]))
-    rejected = "; ".join(f"{k} x{n}" for k, n in why.items()) or "none"
+    why = "; ".join(f"{k} x{n}" for k, n in rejected.items()) or "none"
     if len(rings) < N_FRAMES:
-        raise Abort(f"ring not seen stably ({len(rings)}/{N_FRAMES} good frames; rejected: {rejected})")
-    edges = np.array([[*(c - r * a[:2]), h] for c, r, h, _ in rings])
+        raise Abort(f"ring not seen stably ({len(rings)}/{N_FRAMES} good frames; rejected: {why})")
+    edges = np.array([[*(c - r * a), h] for c, r, h, _ in rings])
     edge = np.median(edges, axis=0)
     spread = float(np.max(np.linalg.norm(edges - edge, axis=1)))
     if spread > AGREE_M:
         raise Abort(f"frames disagree by {spread * 1000:.0f} mm (> {AGREE_M * 1000:.0f}) -- not grasping")
-    ring = {
-        "edge": edge.tolist(),
-        "centre": np.median([c for c, *_ in rings], axis=0).tolist(),
+    return edge, {
         "radius": float(np.median([r for _, r, *_ in rings])),
         "spread_m": spread,
-        "fit_rms_m": float(np.max([rms for *_, rms in rings])),
-        "conf": float(np.min(confs)),
+        "fit_rms_m": max(rms for *_, rms in rings),
+        "conf": min(confs),
+        "rejected": why,
     }
-    if log is not None:
-        log(
-            f"ring: radius {ring['radius'] * 100:.2f} cm, edge {np.round(edge, 3)}, {len(rings)} frames agree to "
-            f"{spread * 1000:.1f} mm, fit rms <= {ring['fit_rms_m'] * 1000:.1f} mm, conf >= {ring['conf']:.2f} "
-            f"(rejected: {rejected})"
-        )
-    return edge, ring
 
 
 def grasp_orientation():
@@ -211,14 +197,19 @@ def grasp_targets(p_detected):
     return pre, p_base, p_base + np.array([0, 0, RAISE_M]), R
 
 
-def grab(arm, camera, model, execute, log, progress):
+def grab(arm, camera, model, execute, log, progress, **motion):
     """Detect the ring, then open, pre-grasp, grasp, close and raise. Dry run (`execute` False):
-    detect and plan every leg with cuRobo, nothing moves. Returns the result payload."""
+    detect and plan every leg with cuRobo, nothing moves. `motion`: go_to_ee_pose's keyword arguments
+    for every move (control_mode, gains). Returns the result payload."""
     why = arm.not_ready()
     if why is not None:
         raise Abort(why)
     progress("detect", 0.0)
-    edge, ring = detect_ring(camera, model, log)
+    edge, ring = detect_ring(camera, model)
+    log(
+        f"ring: radius {ring['radius'] * 100:.2f} cm, {N_FRAMES} frames agree to {ring['spread_m'] * 1000:.1f} mm, "
+        f"fit rms <= {ring['fit_rms_m'] * 1000:.1f} mm, conf >= {ring['conf']:.2f} (rejected: {ring['rejected']})"
+    )
     pre, p_grasp, p_raise, R = grasp_targets(edge)
     quat = Rotation.from_matrix(R).as_quat()
     log(f"grab point base xyz {np.round(p_grasp, 3)}  approach {np.round(R[:, 2], 2)}")
@@ -246,7 +237,7 @@ def grab(arm, camera, model, execute, log, progress):
     arm.gripper(GRIP_OPEN, timeout_s=GRIP_SETTLE_S, force=GRIP_FORCE, speed=GRIP_SPEED)
     for name, p in legs[:2]:
         progress(name, 30.0 if name == "pre-grasp" else 50.0)
-        if not arm.go_to_ee_pose(p, quat, name):
+        if not arm.go_to_ee_pose(p, quat, name, **motion):
             raise Abort(f"{name}: {arm.last_error} -- HOLDING HERE")
     progress("grasp", 70.0, "closing")
     arm.gripper(GRIP_CLOSE, timeout_s=GRIP_SETTLE_S, force=GRIP_FORCE, speed=GRIP_SPEED)
@@ -255,7 +246,7 @@ def grab(arm, camera, model, execute, log, progress):
     # the wrist camera moves with the arm, so a re-detect after lifting isn't
     # reliable -- we just lift a little and keep the grip, confirm by eye.
     progress("raise", 85.0)
-    result["raised"] = arm.go_to_ee_pose(p_raise, quat, "raise")
+    result["raised"] = arm.go_to_ee_pose(p_raise, quat, "raise", **motion)
     log("raised + holding" if result["raised"] else f"raise skipped ({arm.last_error}) -- holding in place")
     return result
 

@@ -6,29 +6,33 @@
 
 ## What it does
 
-Grabs the food container (the tupperware) by its protruding sleeve ring, a side
-pinch of the flat brim, and holds it a little above where it stood. `grab`:
+Grabs the food container (the tupperware) with a side pinch of its flat brim,
+and holds it a little above where it stood. `grab`:
 
+1. **Home:** moves to `home_joints`.
 1. **Locate:** the scene segmenter's `food container` mask
    (`/perception/object_detections`) and the scene camera's depth give a coarse
    position in `arm.frame`.
-1. **View:** the wrist camera moves to 15 cm back along the approach and 25 cm
-   above the container, looking at it, with the image turned upright for the ring
-   detector, which was trained on upright views from above.
-1. **Grasp:** finds the brim in the wrist camera: YOLO segments it, a circle fit
-   of the mask's outline on the brim's plane gives its centre and outer radius,
-   and 5 new frames must each fit the brim's own radius (8.43 cm, within 3 mm)
-   and agree on its outer edge to 5 mm. The grasp point is 3 mm short of the
-   outer edge facing the approach. Then it opens the gripper, moves to a
-   pre-grasp 10 cm back along the approach, moves in, closes and raises 6 cm.
-   The detector loads and warms up in the background from the start of the
-   action, so detection takes about 0.35 s.
+1. **View:** the wrist camera moves 15 cm back along the approach and 25 cm above
+   the container, looking at it. The image is turned upright for the detector,
+   which was trained on upright views.
+1. **Grasp:** YOLO segments the brim, and a circle fit of the mask's outline on
+   the brim's plane gives its outer edge. 5 new frames must each fit the brim's
+   radius (8.43 cm, within 3 mm) and agree on the edge to 5 mm. The grasp point
+   is 3 mm short of the edge, facing the approach. Then it opens the gripper,
+   moves to a pre-grasp 10 cm back, moves in, closes and raises 6 cm.
 
-Every move is a cuRobo move through `self.arm.go_to_ee_pose`. `park` sends the
-arm to the scan pose by a direct joint move, which works when cuRobo refuses the
-start state; it is not collision-checked. Any failed check stops the action
-with the arm holding where it is. It is activated when the user selects a
-`container`. Without it, nothing picks the container up.
+![The wrist camera's frames with the old point (red X, on the inner edge) and the
+fitted brim (cyan) and its outer edge (green); a rejected partial view; and the
+two points' jitter over 157 still frames](ring_detection.jpg)
+
+The detector loads in the background while the arm moves, so detection takes
+about 0.3 s. Every move is a cuRobo move through `self.arm`, in stiff position
+control or, with `impedance`, on the driver's joint impedance controller.
+`park` sends the arm to the scan pose by a direct joint move, which works when
+cuRobo refuses the start state; it is not collision-checked. A failed check
+stops the action with the arm holding where it is. It is activated when the
+user selects a `container`.
 
 Ported from the tupperware grasp in `dhyi-svg/feeding-deployment@8f5a3352`
 (`rammp_grasp_tupperware/`).
@@ -69,10 +73,13 @@ Served under `/grab_container/`, types from `rammp_orchestrator_interfaces`:
 | `/grab_container/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/grab_container/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action | Params                            | Result payload                                                                                                 |
-| ------ | --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| `grab` | `execute` (bool, default `false`) | `{"executed", "container", "container_point", "view_pose", "grasp_point", "approach", "raised", "note"}`, in m |
-| `park` | `execute` (bool, default `false`) | `{"executed", "note"}`                                                                                         |
+| Action | Params                                          | Result payload                                                                                                         |
+| ------ | ----------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `grab` | `execute`, `impedance` (bools, default `false`) | `{"executed", "container", "container_point", "view_pose", "grasp_point", "approach", "ring", "raised", "note"}`, in m |
+| `park` | `execute` (bool, default `false`)               | `{"executed", "note"}`                                                                                                 |
+
+`ring` is the detection's evidence: `radius`, `spread_m` (the frames' agreement),
+`fit_rms_m`, `conf` (YOLO's lowest) and `rejected` (frames left out, and why).
 
 A failed check fails the action with `refused` (recoverable); the arm holds where it is.
 
@@ -102,6 +109,7 @@ passes them as a params file.
 | `grasp_depth_m`           | `-0.003`                                                    | Grasp point along the approach from the brim's outer edge (m; negative: short of it) |
 | `detect_frames`           | `5`                                                         | New frames whose brim edges must agree                                               |
 | `home_joints`             | `[0.067, -1.8971, -3.137, -2.2691, -0.211, -0.6831, 1.725]` | Where `grab` starts (rad, `arm_joint_1..7`)                                          |
+| `impedance_gains`         | `"default"`                                                 | The driver's impedance profile for `impedance` goals: default, soft, medium, stiff   |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other; `arm.mock_urdf` names the

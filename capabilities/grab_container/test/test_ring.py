@@ -1,6 +1,6 @@
 """grasp.ring_in_frame and grasp.detect_ring on a brim rendered from the wrist camera's view pose: the
 fitted outer edge lands on the true one, and the checks reject a wrong-sized ring, a ring cut off by
-the image's edge, too few frames and frames that disagree."""
+the image's edge, too few frames and frames that disagree. grasp.grab hands `motion` to every move."""
 
 import types
 
@@ -68,11 +68,6 @@ class FakeCamera:
     def __init__(self, frames):
         self.frames, self.i, self.stamp = frames, 0, None
 
-    def get(self, name):
-        return types.SimpleNamespace(header=types.SimpleNamespace(stamp=types.SimpleNamespace(sec=0, nanosec=0)))
-
-    stamp_of = staticmethod(lambda msg: msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec)
-
     def frame(self, timeout, after=None):
         if self.i >= len(self.frames):
             return None
@@ -129,3 +124,30 @@ def test_detect_ring_refuses_frames_that_disagree():
     cam = FakeCamera(frames(centres))
     with pytest.raises(grasp.Abort, match="disagree"):
         grasp.detect_ring(cam, FakeModel(cam))
+
+
+class FakeArm:
+    """self.arm for grasp.grab: records each go_to_ee_pose's keyword arguments."""
+
+    last_error = ""
+
+    def __init__(self):
+        self.moves = []
+
+    def not_ready(self):
+        return None
+
+    def gripper(self, *a, **kw):
+        return True
+
+    def go_to_ee_pose(self, pos, quat, label, **kw):
+        self.moves.append((label, kw))
+        return True
+
+
+def test_grab_runs_every_move_with_the_motion_arguments():
+    cam, arm = FakeCamera(frames([CENTRE] * grasp.N_FRAMES)), FakeArm()
+    motion = {"control_mode": 1, "gains": "medium"}
+    out = grasp.grab(arm, cam, FakeModel(cam), True, lambda s: None, lambda *a: None, **motion)
+    assert out["raised"]
+    assert arm.moves == [(name, motion) for name in ("pre-grasp", "grasp", "raise")]

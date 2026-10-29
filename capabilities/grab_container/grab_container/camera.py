@@ -40,7 +40,7 @@ class Camera:
         self.tfbuf = tf2_ros.Buffer()
         self.tfl = tf2_ros.TransformListener(self.tfbuf, node)
         self.turns = 0  # quarter turns counterclockwise applied to every frame (set_upright)
-        self.stamp = None  # the colour stamp of the last frame()
+        self.stamp = None  # the last frame()'s colour stamp (ns)
 
         def keep(name):
             def cb(msg):
@@ -71,31 +71,18 @@ class Camera:
             return None
         return v
 
-    def wait(self, name, timeout, max_age=FRESH_S):
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            v = self.get(name, max_age)
-            if v is not None:
-                return v
-            time.sleep(0.05)
-        return None
-
-    @staticmethod
-    def stamp_of(msg):
-        return msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
-
     def frame(self, timeout, after=None):
-        """(bgr8 image, float32 depth in metres) of the latest colour + aligned depth, or None. `after`: a
-        stamp (stamp_of, ns); only a colour image stamped later is taken. The taken one's is `self.stamp`."""
+        """(bgr8 image, float32 depth in metres) of the latest colour + aligned depth, or None. With
+        `after` (a `self.stamp`), only a newer image. Sets `self.stamp` (ns) to the image's stamp."""
         deadline = time.monotonic() + timeout
         while True:
             color, depth = self.get("color", FRESH_S), self.get("depth", FRESH_S)
-            if color is not None and depth is not None and (after is None or self.stamp_of(color) > after):
+            if color is not None and depth is not None and (after is None or _stamp(color) > after):
                 break
             if time.monotonic() >= deadline:
                 return None
             time.sleep(0.005)
-        self.stamp = self.stamp_of(color)
+        self.stamp = _stamp(color)
         bgr = self.bridge.imgmsg_to_cv2(color, "bgr8")
         dm = self.bridge.imgmsg_to_cv2(depth, "passthrough").astype(np.float32)
         if depth.encoding in ("16UC1", "mono16"):  # the OAK and RealSense drivers publish millimetres
@@ -117,8 +104,7 @@ class Camera:
         return R @ np.asarray(p_cam) + t
 
     def pose_in_base(self, stamp=None):
-        """(R, t): the (turned) camera frame in the arm's base frame (tf2), now, or at `stamp` (ns, an
-        image's stamp_of: where the camera was when it took that image)."""
+        """(R, t): the (turned) camera frame in the arm's base frame (tf2), now or at `stamp` (ns)."""
         R, t = self._raw_pose_in_base(stamp)
         return R @ np.linalg.matrix_power(QUARTER, self.turns), t
 
@@ -142,3 +128,7 @@ class Camera:
             ) from e
         q, t = tf.rotation, tf.translation
         return Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix(), np.array([t.x, t.y, t.z])
+
+
+def _stamp(msg):
+    return msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
