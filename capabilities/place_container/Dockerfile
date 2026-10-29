@@ -33,9 +33,11 @@ COPY capability_engine/ src/capability_engine/
 COPY capabilities/place_container/ src/place_container/
 
 # /module_ws is an overlay on the base's /ros2_ws (the RAMMP interfaces); the
-# base's entrypoint sources its install/ automatically.
+# base's entrypoint sources its install/ automatically. The base ships rosdep's
+# sources but not its cache, hence the update (as grab_container does).
 RUN . /opt/ros/humble/setup.sh \
     && . /ros2_ws/install/setup.sh \
+    && rosdep update --rosdistro humble \
     && apt-get update \
     && rosdep install --from-paths src --ignore-src -y \
     && rm -rf /var/lib/apt/lists/* \
