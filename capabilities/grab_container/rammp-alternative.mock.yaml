@@ -17,4 +17,8 @@ subscribes:
   - /tf_static
   - /wrist_camera/color/image_raw
   - /wrist_camera/color/camera_info
-  - /wrist_camera/aligned_depth_to_color/image_raw
+  - /wrist_camera/depth/image_rect_raw
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /perception/object_detections

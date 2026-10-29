@@ -7,10 +7,23 @@
 ## What it does
 
 Grabs the food container (the tupperware) by its protruding sleeve ring, a side
-pinch of the flat brim, and holds it a little above where it stood. `grab`
-finds the ring in the wrist camera (YOLO segmentation, 5 frames that agree to
-1 cm, the grasp point on the ring's near rim), then opens the gripper, moves to
-a pre-grasp 10 cm back along the approach, moves in, closes and raises 6 cm.
+pinch of the flat brim, and holds it a little above where it stood. `grab`:
+
+1. **Locate:** the scene segmenter's `food container` mask
+   (`/perception/object_detections`) and the scene camera's depth give a coarse
+   position in `arm.frame`.
+1. **View:** the wrist camera moves to 15 cm back along the approach and 25 cm
+   above the container, looking at it, with the image turned upright for the ring
+   detector, which was trained on upright views from above.
+1. **Grasp:** finds the brim in the wrist camera: YOLO segments it, a circle fit
+   of the mask's outline on the brim's plane gives its centre and outer radius,
+   and 5 new frames must each fit the brim's own radius (8.43 cm, within 3 mm)
+   and agree on its outer edge to 5 mm. The grasp point is 3 mm short of the
+   outer edge facing the approach. Then it opens the gripper, moves to a
+   pre-grasp 10 cm back along the approach, moves in, closes and raises 6 cm.
+   The detector loads and warms up in the background from the start of the
+   action, so detection takes about 0.35 s.
+
 Every move is a cuRobo move through `self.arm.go_to_ee_pose`. `park` sends the
 arm to the scan pose by a direct joint move, which works when cuRobo refuses the
 start state; it is not collision-checked. Any failed check stops the action
@@ -21,8 +34,8 @@ Ported from the tupperware grasp in `dhyi-svg/feeding-deployment@8f5a3352`
 (`rammp_grasp_tupperware/`).
 
 The arm moves only when the node runs with `allow_execute: true` and the goal
-sets `execute`; otherwise every goal is a dry run (`grab` detects and plans
-every leg with cuRobo; `park` reports the move) and nothing moves.
+sets `execute`; otherwise every goal is a dry run (`grab` locates the container and
+plans the view move; `park` reports the move) and nothing moves.
 
 ## Publishes
 
@@ -32,14 +45,18 @@ every leg with cuRobo; `park` reports the move) and nothing moves.
 
 ## Subscribes
 
-Only while `grab` runs; `self.arm` also subscribes to the arm driver's state then.
+Only while `grab` runs (the scene topics for the locate step); `self.arm` also subscribes to the arm driver's state then.
 
-| Topic                                            | Type                     | Required | Meaning                        |
-| ------------------------------------------------ | ------------------------ | -------- | ------------------------------ |
-| `/wrist_camera/color/image_raw`                  | `sensor_msgs/Image`      | yes      | Colour, for the ring detector  |
-| `/wrist_camera/color/camera_info`                | `sensor_msgs/CameraInfo` | yes      | Intrinsics                     |
-| `/wrist_camera/aligned_depth_to_color/image_raw` | `sensor_msgs/Image`      | yes      | Depth aligned to colour        |
-| `/tf`, `/tf_static`                              | `tf2_msgs/TFMessage`     | yes      | `arm.frame` \<- `camera_frame` |
+| Topic                                | Type                                           | Required | Meaning                               |
+| ------------------------------------ | ---------------------------------------------- | -------- | ------------------------------------- |
+| `/wrist_camera/color/image_raw`      | `sensor_msgs/Image`                            | yes      | Colour, for the ring detector         |
+| `/wrist_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | yes      | Intrinsics                            |
+| `/wrist_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | yes      | Depth aligned to colour               |
+| `/scene_camera/color/image_raw`      | `sensor_msgs/Image`                            | yes      | Scene colour (the detections' pixels) |
+| `/scene_camera/color/camera_info`    | `sensor_msgs/CameraInfo`                       | yes      | Scene intrinsics                      |
+| `/scene_camera/depth/image_rect_raw` | `sensor_msgs/Image`                            | yes      | Scene depth aligned to colour         |
+| `/perception/object_detections`      | `rammp_perception_interfaces/ObjectDetections` | yes      | The scene segmenter's masks           |
+| `/tf`, `/tf_static`                  | `tf2_msgs/TFMessage`                           | yes      | `arm.frame` \<- `camera_frame`        |
 
 ## Orchestrator interface
 
@@ -52,10 +69,10 @@ Served under `/grab_container/`, types from `rammp_orchestrator_interfaces`:
 | `/grab_container/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/grab_container/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action | Params                            | Result payload                                                    |
-| ------ | --------------------------------- | ----------------------------------------------------------------- |
-| `grab` | `execute` (bool, default `false`) | `{"executed", "grasp_point", "approach", "raised", "note"}`, in m |
-| `park` | `execute` (bool, default `false`) | `{"executed", "note"}`                                            |
+| Action | Params                            | Result payload                                                                                                 |
+| ------ | --------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `grab` | `execute` (bool, default `false`) | `{"executed", "container", "container_point", "view_pose", "grasp_point", "approach", "raised", "note"}`, in m |
+| `park` | `execute` (bool, default `false`) | `{"executed", "note"}`                                                                                         |
 
 A failed check fails the action with `refused` (recoverable); the arm holds where it is.
 
@@ -68,14 +85,23 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name               | Default                        | Meaning                                                   |
-| ------------------ | ------------------------------ | --------------------------------------------------------- |
-| `use_orchestrator` | `true`                         | `false` runs standalone: no registration, drive it by CLI |
-| `mock`             | `false`                        | `true` skips hardware (the mock alternative sets it)      |
-| `allow_execute`    | `false`                        | `false`: every goal is a dry run, whatever it asks        |
-| `model_path`       | `"/models/best.pt"`            | YOLO segmentation weights with the `grabber` class        |
-| `camera_ns`        | `"/wrist_camera"`              | Namespace of the wrist camera's topics                    |
-| `camera_frame`     | `"camera_color_optical_frame"` | The camera's tf frame                                     |
+| Name                      | Default                                                     | Meaning                                                                              |
+| ------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `use_orchestrator`        | `true`                                                      | `false` runs standalone: no registration, drive it by CLI                            |
+| `mock`                    | `false`                                                     | `true` skips hardware (the mock alternative sets it)                                 |
+| `allow_execute`           | `false`                                                     | `false`: every goal is a dry run, whatever it asks                                   |
+| `model_path`              | `"/models/best.pt"`                                         | YOLO segmentation weights with the `grabber` class                                   |
+| `color_topic`             | `"/wrist_camera/color/image_raw"`                           | Colour image                                                                         |
+| `camera_info_topic`       | `"/wrist_camera/color/camera_info"`                         | Its intrinsics                                                                       |
+| `depth_topic`             | `"/wrist_camera/depth/image_rect_raw"`                      | Depth aligned to colour (mm)                                                         |
+| `camera_frame`            | `""`                                                        | The camera's tf frame; `""` = the colour image's frame_id                            |
+| `detections_topic`        | `"/perception/object_detections"`                           | The scene segmenter's detections                                                     |
+| `scene_color_topic`       | `"/scene_camera/color/image_raw"`                           | Scene camera colour                                                                  |
+| `scene_camera_info_topic` | `"/scene_camera/color/camera_info"`                         | Its intrinsics                                                                       |
+| `scene_depth_topic`       | `"/scene_camera/depth/image_rect_raw"`                      | Scene depth aligned to colour (mm)                                                   |
+| `grasp_depth_m`           | `-0.003`                                                    | Grasp point along the approach from the brim's outer edge (m; negative: short of it) |
+| `detect_frames`           | `5`                                                         | New frames whose brim edges must agree                                               |
+| `home_joints`             | `[0.067, -1.8971, -3.137, -2.2691, -0.211, -0.6831, 1.725]` | Where `grab` starts (rad, `arm_joint_1..7`)                                          |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other; `arm.mock_urdf` names the
@@ -142,7 +168,7 @@ engine id, so each capability sends its goals under its own name.
 
 The arm and gripper (through the arm driver), the wrist camera, and the GPU for
 the detector (`gpus: all`). The detector's weights are mounted from
-`/home/jetson/oxo` at `/models` (`model_path`).
+`/home/snorlax/oxo` at `/models` (`model_path`).
 
 ## Alternatives
 

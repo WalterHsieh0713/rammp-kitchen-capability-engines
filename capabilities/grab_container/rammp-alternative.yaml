@@ -21,9 +21,9 @@ container:
   # args replace the CMD and the node never starts. Run the node's executable
   # (`ros2 run`), never `ros2 launch`, which rejects them.
   command: ["ros2", "run", "grab_container", "grab_container_node"]
-  # The ring detector's weights (model_path); they are not in the image.
+  # The ring detector's weights (model_path) on the flatbot; they are not in the image.
   volumes:
-    - /home/jetson/oxo:/models:ro
+    - /home/snorlax/oxo:/models:ro
   # The ring detector's YOLO runs on the GPU (the mock has none and needs none).
   gpus: all
 # Defaults for every value a deployment may change per robot or from the sheppy
@@ -35,9 +35,22 @@ params:
   allow_execute: false
   # The YOLO segmentation weights with the ring's `grabber` class (the volume above).
   model_path: /models/best.pt
-  # Wrist camera; depth must be aligned to colour.
-  camera_ns: /wrist_camera
-  camera_frame: camera_color_optical_frame
+  # Wrist camera (the flatbot's OAK-D); depth must be aligned to colour. camera_frame "" = the
+  # colour image's frame_id.
+  color_topic: /wrist_camera/color/image_raw
+  camera_info_topic: /wrist_camera/color/camera_info
+  depth_topic: /wrist_camera/depth/image_rect_raw
+  camera_frame: ""
+  # The scene segmenter (rammp-perception) and the scene camera it runs on: the container's
+  # coarse position, before the wrist camera's view.
+  detections_topic: /perception/object_detections
+  scene_color_topic: /scene_camera/color/image_raw
+  scene_camera_info_topic: /scene_camera/color/camera_info
+  scene_depth_topic: /scene_camera/depth/image_rect_raw
+  # The grasp point along the approach from the brim's outer edge (m; negative: short of it).
+  grasp_depth_m: -0.003
+  # Where grab starts (rad, arm_joint_1..7 as /joint_states reports them).
+  home_joints: [0.067, -1.8971, -3.137, -2.2691, -0.211, -0.6831, 1.725]
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02
@@ -96,4 +109,8 @@ subscribes:
   - /tf_static
   - /wrist_camera/color/image_raw
   - /wrist_camera/color/camera_info
-  - /wrist_camera/aligned_depth_to_color/image_raw
+  - /wrist_camera/depth/image_rect_raw
+  - /scene_camera/color/image_raw
+  - /scene_camera/color/camera_info
+  - /scene_camera/depth/image_rect_raw
+  - /perception/object_detections

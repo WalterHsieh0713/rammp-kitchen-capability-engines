@@ -3,6 +3,11 @@
 The button press's Perception (rammp_button_press/perception.py), on the capability's own node
 instead of a node and spin thread of its own, and made per action: the subscriptions and the tf
 listener exist only between Camera() and close(). Read-only: nothing here commands anything.
+
+set_upright() turns the frames by quarter turns so the world's up is the image's up: the ring
+detector was trained on upright images, and the wrist camera rolls with the gripper. frame(),
+intrinsics() and pose_in_base() then all describe the turned image, so a point back-projected
+from it lands in the right place.
 """
 
 import threading
@@ -17,10 +22,13 @@ from scipy.spatial.transform import Rotation
 from .grasp import Abort
 
 FRESH_S = 1.0  # a frame older than this is stale
+# One quarter turn counterclockwise (np.rot90): the turned camera frame in the original one.
+QUARTER = np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
 
 
 class Camera:
-    def __init__(self, node, arm_frame, cam_frame, camera_ns="/wrist_camera"):
+    def __init__(self, node, arm_frame, color_topic, info_topic, depth_topic, cam_frame=""):
+        """`cam_frame` "" = the colour image's own frame_id. Depth must be aligned to colour."""
         import tf2_ros
         from cv_bridge import CvBridge
         from sensor_msgs.msg import CameraInfo, Image
@@ -31,6 +39,8 @@ class Camera:
         self.latest = {}
         self.tfbuf = tf2_ros.Buffer()
         self.tfl = tf2_ros.TransformListener(self.tfbuf, node)
+        self.turns = 0  # quarter turns counterclockwise applied to every frame (set_upright)
+        self.stamp = None  # the colour stamp of the last frame()
 
         def keep(name):
             def cb(msg):
@@ -39,12 +49,11 @@ class Camera:
 
             return cb
 
-        ns = camera_ns.rstrip("/")
         qos = qos_profile_sensor_data  # best effort: receives from reliable and best-effort publishers
         self.subs = [
-            node.create_subscription(CameraInfo, f"{ns}/color/camera_info", keep("info"), qos),
-            node.create_subscription(Image, f"{ns}/color/image_raw", keep("color"), qos),
-            node.create_subscription(Image, f"{ns}/aligned_depth_to_color/image_raw", keep("depth"), qos),
+            node.create_subscription(CameraInfo, info_topic, keep("info"), qos),
+            node.create_subscription(Image, color_topic, keep("color"), qos),
+            node.create_subscription(Image, depth_topic, keep("depth"), qos),
         ]
 
     def close(self):
@@ -71,34 +80,65 @@ class Camera:
             time.sleep(0.05)
         return None
 
-    def frame(self, timeout):
-        """(bgr8 image, float32 depth in metres) of the latest colour + aligned depth, or None."""
-        color, depth = self.wait("color", timeout), self.wait("depth", timeout)
-        if color is None or depth is None:
-            return None
+    @staticmethod
+    def stamp_of(msg):
+        return msg.header.stamp.sec * 1_000_000_000 + msg.header.stamp.nanosec
+
+    def frame(self, timeout, after=None):
+        """(bgr8 image, float32 depth in metres) of the latest colour + aligned depth, or None. `after`: a
+        stamp (stamp_of, ns); only a colour image stamped later is taken. The taken one's is `self.stamp`."""
+        deadline = time.monotonic() + timeout
+        while True:
+            color, depth = self.get("color", FRESH_S), self.get("depth", FRESH_S)
+            if color is not None and depth is not None and (after is None or self.stamp_of(color) > after):
+                break
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(0.005)
+        self.stamp = self.stamp_of(color)
         bgr = self.bridge.imgmsg_to_cv2(color, "bgr8")
         dm = self.bridge.imgmsg_to_cv2(depth, "passthrough").astype(np.float32)
-        if depth.encoding in ("16UC1", "mono16"):  # the RealSense driver publishes millimetres
+        if depth.encoding in ("16UC1", "mono16"):  # the OAK and RealSense drivers publish millimetres
             dm /= 1000.0
-        return bgr, dm
+        return np.ascontiguousarray(np.rot90(bgr, self.turns)), np.ascontiguousarray(np.rot90(dm, self.turns))
 
     def intrinsics(self):
         info = self.get("info")
         if info is None:
             raise Abort("no camera_info")
-        return info.k[0], info.k[4], info.k[2], info.k[5]
+        fx, fy, cx, cy, w = info.k[0], info.k[4], info.k[2], info.k[5], info.width
+        for _ in range(self.turns):  # each quarter turn: u' = v, v' = (w - 1) - u
+            fx, fy, cx, cy, w = fy, fx, cy, w - 1 - cx, info.height if w == info.width else info.width
+        return fx, fy, cx, cy
 
     def to_base(self, p_cam):
         """A camera-frame point in the arm's base frame (tf2)."""
+        R, t = self.pose_in_base()
+        return R @ np.asarray(p_cam) + t
+
+    def pose_in_base(self, stamp=None):
+        """(R, t): the (turned) camera frame in the arm's base frame (tf2), now, or at `stamp` (ns, an
+        image's stamp_of: where the camera was when it took that image)."""
+        R, t = self._raw_pose_in_base(stamp)
+        return R @ np.linalg.matrix_power(QUARTER, self.turns), t
+
+    def set_upright(self):
+        """Choose the quarter turns that put the world's up nearest the image's up (-y), from where
+        the camera is now. Returns them."""
+        R, _ = self._raw_pose_in_base()
+        self.turns = max(range(4), key=lambda k: -(R @ np.linalg.matrix_power(QUARTER, k))[2, 1])
+        return self.turns
+
+    def _raw_pose_in_base(self, stamp=None):
+        color = self.get("color")
+        cam_frame = self.cam_frame or (color.header.frame_id if color is not None else "")
+        at = Time() if stamp is None else Time(nanoseconds=stamp)
         try:
-            tf = self.tfbuf.lookup_transform(
-                self.arm_frame, self.cam_frame, Time(), timeout=Duration(seconds=2.0)
-            ).transform
+            tf = self.tfbuf.lookup_transform(self.arm_frame, cam_frame, at, timeout=Duration(seconds=2.0)).transform
         except Exception as e:  # noqa: BLE001 -- tf2's exceptions
             raise Abort(
-                f"tf {self.arm_frame} <- {self.cam_frame} unavailable: {e} -- verify with "
-                f"ros2 run tf2_ros tf2_echo {self.arm_frame} {self.cam_frame}"
+                f"tf {self.arm_frame} <- {cam_frame!r} unavailable: {e} -- verify with "
+                f"ros2 run tf2_ros tf2_echo {self.arm_frame} {cam_frame}"
             ) from e
         q, t = tf.rotation, tf.translation
-        R = Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
-        return R @ np.asarray(p_cam) + np.array([t.x, t.y, t.z])
+        return Rotation.from_quat([q.x, q.y, q.z, q.w]).as_matrix(), np.array([t.x, t.y, t.z])

@@ -26,7 +26,7 @@ WORKDIR /module_ws
 # before the COPYs, so editing code never recompiles it.
 RUN pip install --no-cache-dir pybullet==3.2.7
 
-# The ring detector (grasp.detect_point_cam): ultralytics for the YOLO segmentation model, at
+# The ring detector (grasp.detect_ring): ultralytics for the YOLO segmentation model, at
 # the version the microwave's detector runs with on the Jetson (2026-10-28). The base's torch,
 # torchvision and numpy are held where they are (a constraints file of their installed
 # versions), so ultralytics can't swap the Jetson CUDA torch for a PyPI one.
