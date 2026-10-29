@@ -38,7 +38,8 @@ SETTLE_STILL_S = 0.5  # after the settle the hand must be still this long ...
 SETTLE_WAIT_S = 5.0  # ... within this long
 EXIT_SETTLE_S = 2.0  # leaving impedance: wait at most this long for the arm to be still ...
 EXIT_HOLD_S = 0.5  # ... then a position goal on the current joints, this long
-OPEN_STALLED = 0.3  # the gripper must open past this, or the hand would drag the container
+OPEN_STALLED = 0.3  # the gripper must open past this, or the hand would drag the container ...
+OPEN_WAIT_S = 3.0  # ... within this long of the open command (sent twice at most)
 LOG_COLUMNS = ["t", "phase", "x", "y", "z", "vx", "vy", "vz", "wx", "wy", "wz", "fx", "fy", "fz", "tx", "ty", "tz"]
 
 
@@ -203,8 +204,20 @@ def lower(arm, model, descent, cfg, rec, log):
 def let_go(arm, rec, log):
     """Open the gripper; Refused (hand NOT backed out) if it stays closed on the container."""
     rec.phase = "open"
-    arm.gripper(0.0)
-    pos = float(arm.gripper_state().position)
+    pos = 1.0
+    for attempt in (1, 2):  # the open command once more if the fingers haven't moved
+        arm.gripper(0.0)
+        t0 = time.monotonic()
+        while time.monotonic() - t0 < OPEN_WAIT_S:  # it may start late (flatbot, 2026-10-29: 0.95 right after)
+            pos = float(arm.gripper_state().position)
+            if pos <= OPEN_STALLED:
+                break
+            time.sleep(0.05)
+        if pos <= OPEN_STALLED:
+            break
+        log(
+            f"gripper still at {pos:.2f} after {OPEN_WAIT_S:.0f} s" + (" -- sending open again" if attempt == 1 else "")
+        )
     log(f"gripper open: {pos:.2f} (0 = fully open)")
     if pos > OPEN_STALLED:
         raise Refused(f"STOPPED, hand NOT backed out: the gripper only opened to {pos:.2f}. Open it, then `retreat`")
