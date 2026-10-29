@@ -30,6 +30,7 @@ SAFE_HEIGHT = 0.30  # m, tool frame above the table while carrying the container
 PRESS_BELOW = 0.10  # m, the line down is aimed this far below where the bottom meets the table: in
 # impedance the hand lags its command by a few cm, and the table, not the command, stops it
 MIN_TOOL_HEIGHT = 0.02  # m, the tool frame is never targeted lower than this above the table
+MIN_BELOW_MEET = 0.03  # m, the line down must reach at least this far below where the bottom meets the table
 MAX_DROP = 0.40  # m, the longest straight line down
 PATH_STEP = 0.002  # m, between the line's joint waypoints
 RETREAT = 2.5 * LIP_WIDTH  # m, straight back after letting go: the fingers slide off the lip
@@ -295,6 +296,15 @@ def plan_place(model, q_now, spot, table_z, max_adjust=MAX_ADJUST_DEG, log=None)
     moves += plan_segment(model, moves[-1][1], above, quat, table_z, "transit")
     floor_z = max(table_z + max(BOWL_DEPTH - PRESS_BELOW, MIN_TOOL_HEIGHT), above[2] - MAX_DROP)
     descent = plan_descent(model, moves[-1][1], floor_z, log=log)
+    # The line may end early (reach / joint limits); it must still get below where the bottom meets the
+    # table, or the lowering stops in mid-air (the flatbot at 0.54 m, 2026-10-29: 4 cm of the 22).
+    meet = table_z + BOWL_DEPTH
+    if descent[0][-1] > meet - MIN_BELOW_MEET:
+        raise Refused(
+            f"lower: the arm can only go down to tool z={descent[0][-1]:.3f} here, "
+            f"{(descent[0][-1] - meet) * 100:.0f} cm above where the bottom meets the table -- "
+            f"the spot is {np.hypot(*spot[:2]):.2f} m from the base axis; move it within reach"
+        )
     info = dict(adjust_deg=adjust_deg, approach=approach, table_z=table_z, floor_z=floor_z, camera_left=left)
     return moves, descent, info
 
