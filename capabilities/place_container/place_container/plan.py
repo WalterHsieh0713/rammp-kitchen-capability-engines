@@ -186,14 +186,15 @@ class Model:
         return None if best is None else best[1]
 
 
-def check_joint_move(model, q_a, q_b, table_z, samples=20):
-    """Problems along a straight joint-space move: the container tilts, or the hand dips."""
+def check_joint_move(model, q_a, q_b, table_z, samples=20, tilt_check=True):
+    """Problems along a straight joint-space move: the container tilts (tilt_check: only with something
+    in the hand), or the hand dips."""
     allowed = max(MAX_BOWL_TILT_DEG, model.tilt(q_a) + 1.0, model.tilt(q_b) + 1.0)
     delta = wrap(np.asarray(q_b) - np.asarray(q_a))
     for s in np.linspace(0.0, 1.0, samples):
         T = model.fk(np.asarray(q_a) + s * delta)
         tilt = bowl_tilt_deg(T[:3, :3], model.pitch)
-        if tilt > allowed:
+        if tilt_check and tilt > allowed:
             return [f"the container tilts {tilt:.0f} deg"]
         if table_z is not None and T[2, 3] < table_z + MIN_TOOL_HEIGHT:
             return [f"the hand dips to {(T[2, 3] - table_z) * 100:.1f} cm above the table"]
@@ -408,9 +409,10 @@ def plan_retreat(model, q_start, release=0.0, step=RETREAT_STEP, log=None):
     return qs
 
 
-def reset_moves(model, q_now, q_start):
+def reset_moves(model, q_now, q_start, empty=False):
     """Back to a saved start: straight UP to the start's height first (the open fingers rise clear
-    of the container instead of sweeping across it), then one joint move to the start's joints."""
+    of the container instead of sweeping across it), then one joint move to the start's joints.
+    empty: nothing in the hand, so the joint move may turn the hand any way (no tilt check)."""
     T_now, T_start = model.fk(q_now), model.fk(q_start)
     moves, q = [], np.asarray(q_now, dtype=float)
     if T_start[2, 3] - T_now[2, 3] > 0.005:
@@ -418,7 +420,7 @@ def reset_moves(model, q_now, q_start):
         up[2] = T_start[2, 3]
         moves = plan_segment(model, q, up, Rotation.from_matrix(T_now[:3, :3]).as_quat(), None, "up")
         q = moves[-1][1]
-    problems = check_joint_move(model, q, q_start, None)
+    problems = check_joint_move(model, q, q_start, None, tilt_check=not empty)
     jump = float(np.max(np.abs(wrap_deg(np.asarray(q_start) - q))))
     if problems or jump > MAX_STEP_JUMP_DEG:
         raise Refused("back to the start: " + ("; ".join(problems) or f"a joint moves {jump:.0f} deg"))

@@ -47,7 +47,7 @@ Every action is a dry run (plan and check, nothing moves) unless the node runs w
 | `place`   | `execute`; `x`, `y`, `table_z` (m, arm_mount; all or none = the marked spot); `allow_empty_gripper` | `{"executed", "plan"}` or `{"executed", "recording"}` |
 | `mark`    | —                                                                                                   | `{"spot": [x, y], "table_z"}`                         |
 | `retreat` | `execute`                                                                                           | `{"executed", "to"}`                                  |
-| `reset`   | `execute`, `save` (save the current joints as the start)                                            | `{"executed", "plan"}` or `{"saved"}`                 |
+| `reset`   | `execute`, `save` (save the current joints as the start), `empty` (no tilt check)                   | `{"executed", "plan"}` or `{"saved"}`                 |
 
 Progress phases of `place`: `adjust`, `lift`, `transit`, `lower`, `open`, `retreat`. A failed
 check ends the action with `refused` and the reason; after contact the arm is left holding in

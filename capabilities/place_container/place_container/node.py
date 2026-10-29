@@ -97,7 +97,15 @@ PLACE = {
         "allow_empty_gripper": {"type": "boolean", "default": False},
     },
 }
-RESET = {"type": "object", "properties": {**EXECUTE["properties"], "save": {"type": "boolean", "default": False}}}
+RESET = {
+    "type": "object",
+    "properties": {
+        **EXECUTE["properties"],
+        "save": {"type": "boolean", "default": False},
+        # nothing in the (closed) gripper: skip the container-tilt check on the way back
+        "empty": {"type": "boolean", "default": False},
+    },
+}
 
 
 class Capability(CapabilityEngine):
@@ -261,7 +269,9 @@ class Capability(CapabilityEngine):
             log(f"saved the start position: hand at x={T[0, 3]:.3f} y={T[1, 3]:.3f} z={T[2, 3]:.3f}")
             return {"saved": True}
         start = self._load("start.json", "no start position saved: run reset with save, or a place first")
-        moves = plan.reset_moves(model, self._joints(), np.asarray(start["q"], dtype=float))
+        # Nothing in the hand (the gripper is open, or the goal says so): the way back may turn the hand.
+        empty = float(self.arm.gripper_state().position) <= lower.OPEN_STALLED or bool(params.get("empty", False))
+        moves = plan.reset_moves(model, self._joints(), np.asarray(start["q"], dtype=float), empty=empty)
         steps = [dict(name=n, tool=np.round(model.fk(q)[:3, 3], 3).tolist()) for n, q in moves]
         if not execute:
             return {"executed": False, "plan": steps}
