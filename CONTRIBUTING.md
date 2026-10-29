@@ -72,6 +72,24 @@ as the students' `SheppyArm` (`get_state`, `move_joints`, `move_cartesian`,
 they are sent. Use it inside `execute()`: the arm's ROS resources exist from the
 first arm call to the end of that `execute()`.
 
+**Several waypoints in one motion.** Each `go_to_*` call plans from rest and
+stops dead at its goal. `go_through` plans a list of poses and joint
+configurations as one trajectory, which passes a waypoint without stopping
+wherever its `blend_radius` (m) lets the tool cut the corner:
+
+```python
+from capability_engine.arm import Waypoint
+
+self.arm.go_through(
+    [Waypoint(joints=HOME, blend_radius=0.05), Waypoint(view_pos, view_quat)], "to view"
+)
+```
+
+A radius of 0, and the last waypoint, stop. `straight=True` joint waypoints turn a
+list of joint positions into one smooth motion. The cuRobo planner does the
+blending (`/rammp_curobo/plan_through`) and checks every cut corner for
+collisions in its world.
+
 **What a motion can raise.** `RammpArm`'s methods return `False` for a refused
 or failed motion, an e-stop included, as they always did. On top of that, any
 motion can raise:

@@ -19,7 +19,7 @@ action name in arm.py then fails the tests instead of being mirrored here. Test 
                   finish_at(name, joints=None, flange=None), cancelled(name)
     streams:      set_controllers([(name, channels, available)]), publish_stream_status(open),
                   late_close_on_next_open()
-    planner:      plan_result(points, joint_names=JOINTS, velocities=True)
+    planner:      plan_result(points, joint_names=JOINTS, velocities=True, corner_m=())
 
 Every accepted driver goal (not the planner's) publishes one feedback message as it starts:
 fraction_complete FEEDBACK_FRACTION, actual = the joints, and on go_to goals phase "executing" and
@@ -56,7 +56,7 @@ from rammp_arm_interfaces.msg import (
 from rammp_arm_interfaces.srv import CloseStream, ListControllers, OpenStream, SetGains
 from rammp_common_interfaces.msg import ControlStatus, EStop
 from rammp_common_interfaces.srv import AcquireControl, ReleaseControl, RevokeControl
-from rammp_curobo_interfaces.action import PlanToJoints, PlanToPose
+from rammp_curobo_interfaces.action import PlanThrough, PlanToJoints, PlanToPose
 from rammp_curobo_interfaces.srv import SetWorld
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -100,8 +100,9 @@ ACTIONS = {
     "go_to_preset": (GoToPreset, "/go_to_preset"),
     "plan_to_pose": (PlanToPose, "/rammp_curobo/plan_to_pose"),
     "plan_to_joints": (PlanToJoints, "/rammp_curobo/plan_to_joints"),
+    "plan_through": (PlanThrough, "/rammp_curobo/plan_through"),
 }
-PLANNER_ACTIONS = {"plan_to_pose", "plan_to_joints"}
+PLANNER_ACTIONS = {"plan_to_pose", "plan_to_joints", "plan_through"}
 SERVICES = {
     "open_stream": (OpenStream, "/open_stream"),
     "close_stream": (CloseStream, "/close_stream"),
@@ -199,6 +200,7 @@ class FakeDriver(Node):
         self._hold_s = 0.0
         self._accept_delay_s = 0.0
         self._plan = None
+        self._corner_m = []
         self._controllers = list(CONTROLLERS)
         self._late_close = False
 
@@ -383,21 +385,26 @@ class FakeDriver(Node):
             )
         )
 
-    def plan_result(self, trajectory_points, joint_names=JOINTS, velocities=True):
-        """What plan_to_pose / plan_to_joints return: points (position lists) PLAN_DT_S apart,
-        with zero velocities (none when `velocities` is False)."""
+    def plan_result(self, trajectory_points, joint_names=JOINTS, velocities=True, corner_m=()):
+        """What the planner's actions return: points (position lists) PLAN_DT_S apart, with
+        zero velocities (none when `velocities` is False, these when it is a list of velocity
+        lists), and plan_through's corner_m."""
         traj = JointTrajectory(joint_names=list(joint_names))
         for i, positions in enumerate(trajectory_points):
             t = i * PLAN_DT_S
             sec = int(t)
+            if velocities is True:
+                qd = [0.0] * len(positions)
+            else:
+                qd = list(velocities[i]) if velocities else []
             traj.points.append(
                 JointTrajectoryPoint(
                     positions=[float(x) for x in positions],
-                    velocities=[0.0] * len(positions) if velocities else [],
+                    velocities=[float(x) for x in qd],
                     time_from_start=Duration(sec=sec, nanosec=round((t - sec) * 1e9)),
                 )
             )
-        self._plan = traj
+        self._plan, self._corner_m = traj, [float(c) for c in corner_m]
 
     # -- actions --------------------------------------------------------------------------------
 
@@ -445,6 +452,8 @@ class FakeDriver(Node):
             result.success = code == SUCCESSFUL and self._plan is not None
             result.message = "" if result.success else "FakeDriver: no plan_result set, or failed"
             result.trajectory = self._plan or JointTrajectory()
+            if name == "plan_through":
+                result.corner_m = self._corner_m
         else:
             result.error_code = code
             result.error_string = ERRORS.get(code, "")

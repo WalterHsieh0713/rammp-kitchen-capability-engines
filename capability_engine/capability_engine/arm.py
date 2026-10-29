@@ -47,7 +47,8 @@ from rammp_arm_interfaces.srv import CloseStream, ListControllers, OpenStream, S
 from rammp_common_interfaces.msg import ControlStatus as ControlStatusMsg
 from rammp_common_interfaces.msg import EStop
 from rammp_common_interfaces.srv import AcquireControl, ReleaseControl, RevokeControl
-from rammp_curobo_interfaces.action import PlanToJoints, PlanToPose
+from rammp_curobo_interfaces.action import PlanThrough, PlanToJoints, PlanToPose
+from rammp_curobo_interfaces.msg import Waypoint as WaypointMsg
 from rammp_curobo_interfaces.srv import SetWorld
 from rclpy.action import ActionClient
 from rclpy.callback_groups import CallbackGroup
@@ -95,6 +96,7 @@ HALT_STATUS_WAIT_S = 0.2  # after a HALTED goal, how long to wait for /control_s
 ACTION_ENDED_MESSAGE = "action ended"  # last_error of a motion the end of its action stopped
 PLANNER_WAIT_S = 5.0  # how long a go_to_* call waits for its action server (the cuRobo planner)
 GO_TO_SETTLE_S = 0.3  # after a go_to goal, let /ee_state and /joint_states catch up with its end
+GO_THROUGH_PATH_TOL_RAD = 0.35  # go_through's tracking tolerance per joint: the driver's go_to one
 GRIPPER_PERIOD_S = 0.02  # gripper() streams /setpoint/gripper at 50 Hz
 GRIPPER_MOVED = 0.002  # gripper(): a position change (0..1) above this means the fingers move
 GRIPPER_JUDGE_AFTER_S = 0.5  # gripper(): the fingers are judged still only after this long
@@ -154,6 +156,7 @@ ACTIONS = {
     "go_to_preset": (GoToPreset, "/go_to_preset"),
     "plan_to_pose": (PlanToPose, "/rammp_curobo/plan_to_pose"),
     "plan_to_joints": (PlanToJoints, "/rammp_curobo/plan_to_joints"),
+    "plan_through": (PlanThrough, "/rammp_curobo/plan_through"),
 }
 SERVICES = {
     "open_stream": (OpenStream, "/open_stream"),
@@ -273,6 +276,25 @@ class Plan:
     q: np.ndarray = field(default_factory=lambda: np.zeros((0, len(JOINTS))))
     qd: np.ndarray = field(default_factory=lambda: np.zeros((0, len(JOINTS))))
     planning_time: float = 0.0  # s
+    corner_m: list = field(default_factory=list)  # plan_through: see Waypoint.blend_radius
+
+
+@dataclass
+class Waypoint:
+    """One waypoint of go_through / plan_through: the tool at (pos, quat xyzw) in arm_mount, or
+    `joints` (rad, J1..J7), never both. `blend_radius` (m): how far the tool may pass from the
+    planned path here, still moving, instead of stopping on it; 0 stops here, and the last
+    waypoint always stops. The planner cuts the corner only as far as the joint limits and its
+    collision world allow, and reports how far it did (Plan.corner_m). `hold` (HOLD_*): a pose's
+    orientation hold on the way to it. `straight`: joints reached by a straight line in joint
+    space instead of a planned path (collision-checked, never detoured)."""
+
+    pos: tuple = None
+    quat: tuple = None
+    joints: tuple = None
+    blend_radius: float = 0.0
+    hold: int = HOLD_NONE
+    straight: bool = False
 
 
 @dataclass
@@ -365,7 +387,29 @@ def _plan(res):
         np.array([[p.positions[i] for i in idx] for p in points]).reshape(-1, len(JOINTS)),
         np.array([[p.velocities[i] for i in idx] for p in points]).reshape(-1, len(JOINTS)),
         float(res.planning_time),
+        list(getattr(res, "corner_m", [])),
     )
+
+
+def _waypoint_msg(w):
+    """A Waypoint as the planner's message."""
+    if w.joints is not None:
+        return WaypointMsg(
+            kind=WaypointMsg.JOINTS,
+            joints=[float(x) for x in w.joints],
+            straight=bool(w.straight),
+            blend_radius=float(w.blend_radius),
+        )
+    m = WaypointMsg(
+        kind=WaypointMsg.POSE,
+        hold=int(w.hold),
+        straight=bool(w.straight),
+        blend_radius=float(w.blend_radius),
+    )
+    p, o = m.pose.position, m.pose.orientation
+    p.x, p.y, p.z = map(float, w.pos[:3])
+    o.x, o.y, o.z, o.w = map(float, w.quat)
+    return m
 
 
 def _setpoint(channel, value):
@@ -756,6 +800,15 @@ class ArmInterface:
         except sim.SimModelError:
             return None
 
+    def _mock_ik(self, pos, quat):
+        """Mock mode: the sim's IK solution for the tool at (pos, quat), seeded from the mock
+        joints, or None when there is no sim or it misses by more than MAX_IK_ERR."""
+        model = self._mock_sim()
+        if model is None:
+            return None
+        solution, err = sim.solve_ik(*model, pos[:3], quat, self._mock_q)
+        return solution if err <= sim.MAX_IK_ERR else None
+
     def _mock_read(self, topic):
         """Mock mode's state: the last commanded joints, at rest; the tool from the sim's FK when
         there is a sim (which sets the shared sim's arm joints), else at the origin; no e-stop,
@@ -989,11 +1042,7 @@ class ArmInterface:
         from the mock joints); otherwise they stay."""
         if self._mock:
             self._checkpoint()
-            model, q = self._mock_sim(), None
-            if model is not None:
-                solution, err = sim.solve_ik(*model, pos[:3], quat, self._mock_q)
-                q = solution if err <= sim.MAX_IK_ERR else None
-            return self._mock_sent(label, q)
+            return self._mock_sent(label, self._mock_ik(pos, quat))
         g = GoToEEPose.Goal()
         g.target = PoseStamped()
         g.target.header.frame_id = rammp_arm.FRAME
@@ -1005,13 +1054,7 @@ class ArmInterface:
         g.orientation_hold = orientation_hold
         if not self._go_to("go_to_ee_pose", g, label, speed_scale, control_mode, gains, feedback):
             return False
-        tool = _tool_position(self._read("/ee_state"))
-        e = float(np.linalg.norm(tool - np.asarray(pos[:3], float)))
-        message = f"  {label}: tool {e * 100:.1f} cm from the goal"
-        if e > rammp_arm.GO_TO_TRACK_M:
-            return self._refuse(message)
-        self._node.get_logger().info(message)
-        return True
+        return self._tool_reached(label, pos)
 
     def go_to_joint_config(
         self,
@@ -1035,14 +1078,7 @@ class ArmInterface:
             "go_to_joint_config", g, label, speed_scale, control_mode, gains, feedback
         ):
             return False
-        d = np.asarray(q, float) - self.raw_joints()
-        d[CONTINUOUS] = (d[CONTINUOUS] + np.pi) % (2 * np.pi) - np.pi
-        e = float(np.degrees(np.max(np.abs(d))))
-        message = f"  {label}: joints within {e:.1f} deg of the goal"
-        if e > rammp_arm.GO_TO_TRACK_DEG:
-            return self._refuse(message)
-        self._node.get_logger().info(message)
-        return True
+        return self._joints_reached(label, q)
 
     def go_to_preset(
         self, name: str, speed_scale=None, *, control_mode=POSITION, gains=None, feedback=None
@@ -1057,6 +1093,92 @@ class ArmInterface:
         g = GoToPreset.Goal()
         g.preset_name = name
         return self._go_to("go_to_preset", g, label, speed_scale, control_mode, gains, feedback)
+
+    def go_through(
+        self,
+        waypoints,
+        label="go_through",
+        speed_scale=None,
+        *,
+        control_mode=POSITION,
+        gains=None,
+        feedback=None,
+    ):
+        """Through `waypoints` (Waypoint) in ONE motion: cuRobo plans the whole path from the
+        measured joints (plan_through), stopping only on waypoints whose blend_radius is 0 and on
+        the last, and the driver executes it at `speed_scale` (default GO_TO_SPEED_SCALE) of its
+        planned speed. Blocking; True if the driver succeeded and the arm ended on the last
+        waypoint as go_to_ee_pose / go_to_joint_config judge it. Keyword arguments as in
+        go_to_ee_pose. In mock mode the joints become the last waypoint's (IK'd for a pose, as
+        go_to_ee_pose does)."""
+        waypoints = list(waypoints)
+        if not waypoints:
+            self._fail(ArmError, f"{label}: no waypoints")
+        last = waypoints[-1]
+        if self._mock:
+            self._checkpoint()
+            q = last.joints if last.joints is not None else self._mock_ik(last.pos, last.quat)
+            return self._mock_sent(label, q)
+        _impedance_gains(gains)  # a bad `gains` raises before anything is planned
+        self._checkpoint()
+        self._check_command()
+        why = self.not_ready()
+        if why is not None:
+            return self._refuse(f"  RammpArm: {label}: {why} -- nothing sent.")
+        plan = self.plan_through(waypoints, self.raw_joints())
+        if not plan.success:
+            return self._refuse(f"  RammpArm: {label}: no plan ({plan.message}) -- nothing sent.")
+        s = float(rammp_arm.GO_TO_SPEED_SCALE if speed_scale is None else speed_scale)
+        corners = ", ".join(f"{c * 100:.1f}" for c in plan.corner_m[:-1]) or "none"
+        self._node.get_logger().info(
+            f"  {label}: cuRobo planned {len(waypoints)} waypoints as one path, "
+            f"{plan.t[-1]:.2f} s at full speed (corners cut {corners} cm), run at {s:g} x ..."
+        )
+        try:
+            res = self.execute_joint_trajectory(
+                JOINTS,
+                zip(plan.t, plan.q, plan.qd, strict=True),
+                path_tolerance=GO_THROUGH_PATH_TOL_RAD,
+                control_mode=control_mode,
+                gains=gains,
+                speed_scale=s,
+                feedback=feedback,
+            )
+        except ArmError as e:
+            if type(e) is not ArmError:  # EStopped, ControlTaken, ...: as for any motion
+                raise
+            return False  # refused or timed out: execute_joint_trajectory logged it
+        if res.error_code != SUCCESSFUL:
+            return self._refuse(
+                f"  RammpArm: {label} ended {ERRORS.get(res.error_code, res.error_code)} "
+                f"{res.error_string}"
+            )
+        time.sleep(GO_TO_SETTLE_S)  # let /ee_state and /joint_states catch up with the end
+        if last.joints is not None:
+            return self._joints_reached(label, last.joints)
+        return self._tool_reached(label, last.pos)
+
+    def _tool_reached(self, label, pos):
+        """Whether the tool ended within GO_TO_TRACK_M of `pos`; logged, a refusal if not."""
+        tool = _tool_position(self._read("/ee_state"))
+        e = float(np.linalg.norm(tool - np.asarray(pos[:3], float)))
+        message = f"  {label}: tool {e * 100:.1f} cm from the goal"
+        if e > rammp_arm.GO_TO_TRACK_M:
+            return self._refuse(message)
+        self._node.get_logger().info(message)
+        return True
+
+    def _joints_reached(self, label, q):
+        """Whether every joint ended within GO_TO_TRACK_DEG of `q` (free joints compared the
+        short way); logged, a refusal if not."""
+        d = np.asarray(q, float) - self.raw_joints()
+        d[CONTINUOUS] = (d[CONTINUOUS] + np.pi) % (2 * np.pi) - np.pi
+        e = float(np.degrees(np.max(np.abs(d))))
+        message = f"  {label}: joints within {e:.1f} deg of the goal"
+        if e > rammp_arm.GO_TO_TRACK_DEG:
+            return self._refuse(message)
+        self._node.get_logger().info(message)
+        return True
 
     def _go_to(self, name, g, label, speed_scale, control_mode, gains, feedback):
         g.gains = _impedance_gains(gains)  # a bad `gains` raises before anything is sent
@@ -1450,6 +1572,17 @@ class ArmInterface:
         g.target_joints = [float(x) for x in q_goal]
         g.start_joints = [float(x) for x in start_joints]
         return self._plan_goal("plan_to_joints", g)
+
+    def plan_through(self, waypoints, start_joints) -> Plan:
+        """cuRobo's plan through `waypoints` (Waypoint) from `start_joints` (rad, arm_joint_1..7):
+        ONE trajectory that stops only on waypoints whose blend_radius is 0 and on the last
+        (/rammp_curobo/plan_through). Plan.corner_m: per waypoint, how far the tool passes from
+        the planned path there (m). A failed plan, a waypoint the planner refuses included, is
+        Plan(success=False, message) naming the waypoint."""
+        g = PlanThrough.Goal()
+        g.waypoints = [_waypoint_msg(w) for w in waypoints]
+        g.start_joints = [float(x) for x in start_joints]
+        return self._plan_goal("plan_through", g)
 
     def set_world(self, world: str) -> tuple[bool, str]:
         """Swap cuRobo's collision world for the packaged world `world`: (success, message)."""

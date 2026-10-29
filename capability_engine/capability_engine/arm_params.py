@@ -72,6 +72,7 @@ PARAMS = [
     _param(arm, "HALT_STATUS_WAIT_S", "After a HALTED goal, wait for an e-stop status (s)"),
     _param(arm, "PLANNER_WAIT_S", "Wait for the cuRobo planner's action server (s)"),
     _param(arm, "GO_TO_SETTLE_S", "After a go_to goal, let the state catch up (s)"),
+    _param(arm, "GO_THROUGH_PATH_TOL_RAD", "go_through: per-joint tracking tolerance (rad)"),
     _param(arm, "GRIPPER_PERIOD_S", "gripper() setpoint period (s)"),
     _param(arm, "GRIPPER_MOVED", "gripper(): position change that counts as moving (0..1)"),
     _param(arm, "GRIPPER_JUDGE_AFTER_S", "gripper(): judge the fingers still only after (s)"),
