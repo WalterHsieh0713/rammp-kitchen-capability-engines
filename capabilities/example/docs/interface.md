@@ -103,6 +103,7 @@ engine id, so each capability sends its goals under its own name.
 | `arm.halt_status_wait_s`       | `0.2`                                              | After a HALTED goal, wait for an e-stop status (s)         |
 | `arm.planner_wait_s`           | `5.0`                                              | Wait for the cuRobo planner's action server (s)            |
 | `arm.go_to_settle_s`           | `0.3`                                              | After a go_to goal, let the state catch up (s)             |
+| `arm.go_through_path_tol_rad`  | `0.35`                                             | go_through: per-joint tracking tolerance (rad)             |
 | `arm.gripper_period_s`         | `0.02`                                             | gripper() setpoint period (s)                              |
 | `arm.gripper_moved`            | `0.002`                                            | gripper(): position change that counts as moving (0..1)    |
 | `arm.gripper_judge_after_s`    | `0.5`                                              | gripper(): judge the fingers still only after (s)          |
