@@ -1,0 +1,14 @@
+# The mock: the real alternative's exact interface, no hardware. Other teams
+# develop against it, the all-mock profile runs on it, and CI smoke-tests it.
+# check_capabilities.py rejects a mock whose topics differ from the real one.
+id: place_container_mock
+tier: experimental
+kind: docker
+container:
+  image: ghcr.io/rammp-org/rammp-kitchen-capability-engines/place_container:dev
+  network_mode: host
+  ipc: host
+  command: ["ros2", "launch", "place_container", "place_container.launch.py", "mock:=true"]
+# No `params:` here: they would need `ros2 run`, and this fragment uses `ros2 launch` for mock:=true.
+publishes: [/place_container/status]
+subscribes: []
