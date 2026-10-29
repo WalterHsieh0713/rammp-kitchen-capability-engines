@@ -262,12 +262,63 @@ def check_straight(model, q_a, q_b, samples=20, max_dev=0.005):
     return []
 
 
-def plan_place(model, q_now, spot, table_z, max_adjust=MAX_ADJUST_DEG, log=None):
+def reaches(descent, table_z):
+    """The line down gets at least MIN_BELOW_MEET below where the bottom meets the table."""
+    return descent[0][-1] <= table_z + BOWL_DEPTH - MIN_BELOW_MEET
+
+
+def reach_refusal(descent, table_z, spot):
+    meet = table_z + BOWL_DEPTH
+    return (
+        f"lower: the arm can only go down to tool z={descent[0][-1]:.3f} here, "
+        f"{(descent[0][-1] - meet) * 100:.0f} cm above where the bottom meets the table -- "
+        f"the spot is {np.hypot(*spot[:2]):.2f} m from the base axis"
+    )
+
+
+def find_posture(model, pos, quat, q_from, floor_z, table_z, seeds=40, tries=5, log=None):
+    """Another arm posture (7 joints: elbow / wrist arranged differently) with the tool at (pos, quat)
+    whose straight line down reaches the table, or None: (q, descent), the one moving the joints least
+    from q_from. IK from random seeds; a quick check at the bottom of the line first, then the full
+    line for at most `tries` of them."""
+    rng = np.random.default_rng(1)
+    lo = np.array([a if a < b else -np.pi for a, b in model.limits])
+    hi = np.array([b if a < b else np.pi for a, b in model.limits])
+    found = []
+    for _ in range(seeds):
+        q = model.ik(pos, quat, rng.uniform(lo, hi), restarts=0)
+        if q is not None and not any(np.max(np.abs(wrap_deg(q - f))) < 10.0 for f in found):
+            found.append(q)
+    found.sort(key=lambda q: float(np.max(np.abs(wrap_deg(q - q_from)))))
+    bottom = np.array([pos[0], pos[1], table_z + BOWL_DEPTH - MIN_BELOW_MEET])
+    for q in found:
+        if tries == 0:
+            break
+        if model.ik(bottom, quat, q, restarts=0, stay=0.01) is None:
+            continue
+        tries -= 1
+        try:
+            descent = plan_descent(model, q, floor_z)
+        except Refused:
+            continue
+        if reaches(descent, table_z):
+            if log is not None:
+                log(
+                    f"another arm posture reaches the table ({float(np.max(np.abs(wrap_deg(q - q_from)))):.0f} deg "
+                    "away at the most-moved joint)"
+                )
+            return q, descent
+    return None
+
+
+def plan_place(model, q_now, spot, table_z, max_adjust=MAX_ADJUST_DEG, allow_reconfigure=False, log=None):
     """The whole place from joints q_now: (moves [(name, q)], descent (zs, qs), info).
 
     adjust (square the hand in place to the NEAREST hold) -> lift to SAFE_HEIGHT if lower ->
     transit to above the spot -> the straight line down (descent; aimed PRESS_BELOW under where the
-    bottom meets the table, at most MAX_DROP). Raises Refused with the reason."""
+    bottom meets the table, at most MAX_DROP). If the line can't reach the table in the arm's posture,
+    find_posture looks for another one; it is used only with allow_reconfigure (the move is then
+    "transit-reconfigure", to those exact joints). Raises Refused with the reason."""
     T_now = model.fk(q_now)
     heading = T_now[:3, 2].copy()
     heading[2] = 0.0
@@ -293,19 +344,37 @@ def plan_place(model, q_now, spot, table_z, max_adjust=MAX_ADJUST_DEG, log=None)
         lift[2] = safe_z
         moves += plan_segment(model, moves[-1][1], lift, adjust_quat, table_z, "lift")
     above = tool_above_spot(spot, table_z, SAFE_HEIGHT, model.reach)
-    moves += plan_segment(model, moves[-1][1], above, quat, table_z, "transit")
+    q_from = moves[-1][1]
+    transit = plan_segment(model, q_from, above, quat, table_z, "transit")
     floor_z = max(table_z + max(BOWL_DEPTH - PRESS_BELOW, MIN_TOOL_HEIGHT), above[2] - MAX_DROP)
-    descent = plan_descent(model, moves[-1][1], floor_z, log=log)
+    descent = plan_descent(model, transit[-1][1], floor_z, log=log)
     # The line may end early (reach / joint limits); it must still get below where the bottom meets the
     # table, or the lowering stops in mid-air (the flatbot at 0.54 m, 2026-10-29: 4 cm of the 22).
-    meet = table_z + BOWL_DEPTH
-    if descent[0][-1] > meet - MIN_BELOW_MEET:
-        raise Refused(
-            f"lower: the arm can only go down to tool z={descent[0][-1]:.3f} here, "
-            f"{(descent[0][-1] - meet) * 100:.0f} cm above where the bottom meets the table -- "
-            f"the spot is {np.hypot(*spot[:2]):.2f} m from the base axis; move it within reach"
-        )
-    info = dict(adjust_deg=adjust_deg, approach=approach, table_z=table_z, floor_z=floor_z, camera_left=left)
+    reconfigure = False
+    if not reaches(descent, table_z):
+        why = reach_refusal(descent, table_z, spot)
+        other = find_posture(model, above, quat, q_from, floor_z, table_z, log=log)
+        if other is None:
+            raise Refused(why + "; no other arm posture reaches it either -- move the spot (0.80-0.95 m is safe)")
+        if not allow_reconfigure:
+            raise Refused(
+                why + "; ANOTHER arm posture reaches it: allow_reconfigure:=true to use it "
+                "(a bigger move, planned by cuRobo in joint space)"
+            )
+        q_t, descent = other
+        problems = check_joint_move(model, q_from, q_t, table_z)
+        if problems:
+            raise Refused("transit to the other posture: " + "; ".join(problems))
+        transit, reconfigure = [("transit-reconfigure", q_t)], True
+    moves += transit
+    info = dict(
+        adjust_deg=adjust_deg,
+        approach=approach,
+        table_z=table_z,
+        floor_z=floor_z,
+        camera_left=left,
+        reconfigure=reconfigure,
+    )
     return moves, descent, info
 
 

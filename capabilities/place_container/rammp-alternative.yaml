@@ -59,6 +59,9 @@ params:
   retreat_speed: 0.06
   # Spot distance from the arm base axis (m) with the full descent (flatbot, table z 0.198).
   reach: [0.70, 1.10]
+  # Where the line down can't reach the table in the arm's posture, switch to another posture that can
+  # (go_to_joint_config: a bigger move, no level hold); false = refuse instead.
+  allow_reconfigure: false
   # The squaring turn may correct at most this much (deg).
   max_adjust_deg: 15.0
   # A marked spot older than this (min) is refused: the chair may have moved.

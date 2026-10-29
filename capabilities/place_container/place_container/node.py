@@ -72,6 +72,9 @@ PARAMS = {
     # spot distance from the arm base axis (m) where the whole place plans with the full descent
     # (flatbot, table z 0.198: test_place_bowl.py --sweep); outside it the plan still decides
     "reach": [0.70, 1.10],
+    # where the line down can't reach the table in the arm's posture, switch to another posture that can
+    # (go_to_joint_config: a bigger move, cuRobo in joint space, no level hold); off = refuse instead
+    "allow_reconfigure": False,
     # the squaring turn may correct at most this much (deg)
     "max_adjust_deg": plan.MAX_ADJUST_DEG,
     # a marked spot older than this (min) is refused: the chair may have moved
@@ -165,8 +168,19 @@ class Capability(CapabilityEngine):
         if not lo <= r <= hi:
             log(f"the spot is {r:.2f} m from the base axis, outside the reach {lo:.2f}-{hi:.2f}; the plan decides")
         moves, descent, info = plan.plan_place(
-            model, q_now, spot, table_z, max_adjust=self.cfg["max_adjust_deg"], log=log
+            model,
+            q_now,
+            spot,
+            table_z,
+            max_adjust=self.cfg["max_adjust_deg"],
+            allow_reconfigure=self.cfg["allow_reconfigure"],
+            log=log,
         )
+        if info["reconfigure"]:
+            log(
+                "NOTE: the transit changes the arm's posture (cuRobo, joint space): a bigger move, the container's "
+                "tilt is checked only along a straight joint path -- watch it"
+            )
         steps = self._describe(model, moves, descent, table_z, log)
         log(f"adjust turns the hand {info['adjust_deg']:.1f} deg; no obstacle check -- keep the spot clear")
         if not execute:
@@ -181,6 +195,10 @@ class Capability(CapabilityEngine):
                 # a small turn in place: our checked joint move (cuRobo swung the hand sideways and back
                 # for it, 2026-10-08)
                 ok = self.arm.move_joints([q], speed_scale=self.cfg["adjust_speed_scale"])
+            elif name == "transit-reconfigure":
+                # to these exact joints: the posture whose line down reaches the table
+                log(f"-> {name} (go_to_joint_config, speed x{self.cfg['go_to_speed_scale']})")
+                ok = self.arm.go_to_joint_config(q, name, speed_scale=self.cfg["go_to_speed_scale"])
             else:
                 T = model.fk(q)
                 log(f"-> {name} (go_to_ee_pose, level, speed x{self.cfg['go_to_speed_scale']})")
@@ -193,9 +211,18 @@ class Capability(CapabilityEngine):
                 )
             if not ok:
                 raise plan.Refused(f"STOPPED: {name} did not complete ({self.arm.last_error})")
-        tilt = model.tilt(self._joints())
+        q_top = self._joints()
+        tilt = model.tilt(q_top)
         if tilt > 1.0:
             raise plan.Refused(f"STOPPED: the container is {tilt:.1f} deg off its hold after the moves")
+        # The line down again, from where the arm IS: go_to_ee_pose lets cuRobo choose the joints, and a
+        # line planned from other joints would start with a jump between the two postures.
+        descent = plan.plan_descent(model, q_top, info["floor_z"], log=log)
+        if not plan.reaches(descent, table_z):
+            raise plan.Refused(
+                f"STOPPED above the spot: {plan.reach_refusal(descent, table_z, spot)} in the posture cuRobo "
+                "chose -- nothing let go"
+            )
 
         rec, cfg = lower.Recorder(), {**self.cfg, "table_z": table_z, "bowl_depth": plan.BOWL_DEPTH}
         try:
