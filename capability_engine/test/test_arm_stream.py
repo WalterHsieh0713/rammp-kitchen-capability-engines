@@ -12,9 +12,10 @@ from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 
 from capability_engine import arm as arm_module
-from capability_engine.arm import HOLD_LEVEL, ArmInterface, Controller, Plan
+from capability_engine.arm import HOLD_LEVEL, ArmInterface, Controller, Plan, Stream
 from capability_engine.driver_state import (
     ArmError,
+    DriverState,
     EStopped,
     ModeConflict,
     NotInAction,
@@ -29,6 +30,7 @@ TWIST = np.ones(6) * 0.01
 OPEN_DELAY_S = 0.5  # how long the fake takes to answer open_stream, past CANCEL_AFTER_S
 CANCEL_AFTER_S = 0.3  # when a test cancels the action during a service call
 SLOW_ANSWER_S = 2.0  # how long the slow test service takes to answer (> CANCEL_AFTER_S)
+END_LANDS_S = 0.1  # how long a test holds a call back while end_action() starts
 
 
 def wait_until(condition, timeout_s=WAIT_S):
@@ -186,6 +188,25 @@ def test_driver_api_raises_estopped(arm_env):
     assert not fake.requests["open_stream"]
 
 
+def test_a_refusal_takes_its_type_and_reason_from_one_status(arm_env, monkeypatch):
+    """/control_status can change between taking the reason and choosing the error (a callback
+    in between): both come from one snapshot, so an e-stop reason is always EStopped. Here the
+    e-stop clears just after the reason is taken, so any later look at the status disagrees."""
+    arm, _, fake = arm_env
+    fake.engage_estop()
+    arm.begin_action(FakeCtx(), TOKEN)
+    reason = DriverState._reason
+
+    def reason_then_clear(ds, st, token, sender_id):
+        why = reason(ds, st, token, sender_id)
+        ds._status = (False, *ds._status[1:])  # a /control_status callback lands here
+        return why
+
+    monkeypatch.setattr(DriverState, "_reason", reason_then_clear)
+    with pytest.raises(EStopped, match="arm is E-STOPPED -- clear it first"):
+        arm.execute_joint_trajectory(JOINTS, [(1.0, [0.1] * 7, [0.0] * 7)])
+
+
 @pytest.mark.parametrize("phase", ["server", "answer"])
 def test_cancel_during_service_call(arm_env, monkeypatch, phase):
     """A cancel interrupts a service call waiting for its server, or for its answer."""
@@ -266,6 +287,33 @@ def test_end_action_closes_an_open_stream(arm_env):
             arm.end_action()
             assert counts(node) == base
             s.send(TWIST)
+    assert last_twist(fake) == [0.0] * 6
+    assert len(fake.requests["close_stream"]) == 1
+
+
+def test_a_send_racing_the_close_publishes_nothing_after_it(arm_env):
+    """The stream closes (end_action() in another thread) while send() is between its first
+    check and its publish: send() raises NotInAction and publishes nothing after the hold."""
+    arm, _, fake = arm_env
+    arm.begin_action(FakeCtx(), None)
+    with arm.stream("ee_twist") as s:
+        s.send(TWIST)
+        message = s._message
+
+        def close_then_message(value):  # runs between send()'s first check and its publish
+            s._message = message
+            # In another thread, as end_action() would, so the test fails, not hangs, if
+            # _message ever runs under send()'s (non-reentrant) lock.
+            closer = threading.Thread(target=s.close, daemon=True)
+            closer.start()
+            closer.join(WAIT_S)
+            assert not closer.is_alive(), "close() is waiting for send()'s lock"
+            return message(value)
+
+        s._message = close_then_message
+        with pytest.raises(NotInAction):
+            s.send(TWIST)
+    time.sleep(POLL_S * 10)  # a setpoint published after the hold would have arrived
     assert last_twist(fake) == [0.0] * 6
     assert len(fake.requests["close_stream"]) == 1
 
@@ -359,6 +407,16 @@ def test_plan_to_joints_and_failure(arm_env):
     np.testing.assert_allclose(fake.goals["plan_to_joints"][-1].target_joints, [0.1] * 7)
 
 
+def test_a_rejected_plan_says_so_without_claiming_nothing_moved(arm_env):
+    """A plan never moves the arm: its REJECTED message has no "-- nothing moved"."""
+    arm, _, fake = arm_env
+    fake.accept("plan_to_joints", False)
+    arm.begin_action(FakeCtx(), None)
+    plan = arm.plan_to_joints([0.1] * 7, [0.0] * 7)
+    assert not plan.success
+    assert plan.message == arm.last_error == "plan_to_joints: goal REJECTED"
+
+
 def test_hold_constants_match_the_planner():
     goal = PlanToPose.Goal
     assert (arm_module.HOLD_NONE, arm_module.HOLD_LEVEL, arm_module.HOLD_FIXED) == (
@@ -397,6 +455,33 @@ def test_cancel_while_opening_closes_only_a_stream_the_driver_opened(arm_env, ac
         with arm.stream("ee_twist"):
             pass
     assert len(fake.requests["close_stream"]) == (1 if accept else 0)
+
+
+def test_end_action_just_as_open_stream_is_sent_closes_the_late_session(arm_env, monkeypatch):
+    """end_action() in another thread lands just as /open_stream is sent, before the stream
+    has noted the request, and the driver opens the session late: end_action()'s settle still
+    sees the request and closes the session."""
+    arm, _, fake = arm_env
+    fake.delay_open_stream(OPEN_DELAY_S)  # answered within the close's CLOSE_STREAM_WAIT_S
+    arm.begin_action(FakeCtx(), None)
+    ender = threading.Thread(target=arm.end_action)
+
+    def end_then_note(stream, future):  # the stream notes the sent request (on_sent)
+        if future is not None:
+            ender.start()
+            time.sleep(END_LANDS_S)  # end_action() is under way before the note
+        stream.__dict__["_open_sent"] = future
+
+    noted = property(lambda stream: stream.__dict__["_open_sent"], end_then_note)
+    monkeypatch.setattr(Stream, "_open_sent", noted, raising=False)
+    with pytest.raises(NotInAction):
+        with arm.stream("ee_twist"):
+            pass
+    ender.join(WAIT_S + OPEN_DELAY_S)
+    assert not ender.is_alive()
+    time.sleep(OPEN_DELAY_S)  # the driver has answered, and opened the session, by now
+    assert len(fake.requests["open_stream"]) == 1
+    assert not fake.session_open(), "the session the driver opened late is still open"
 
 
 def test_mock_stream_honours_cancel_and_its_end(ros):

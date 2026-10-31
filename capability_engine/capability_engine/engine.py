@@ -52,7 +52,6 @@ from rclpy.node import Node
 from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import String
 
-from capability_engine import arm as arm_module
 from capability_engine import sim
 from capability_engine.action_scope import ENDED_MESSAGE, ActionScope, ScopeClosed
 from capability_engine.arm import ArmInterface, wait_until
@@ -81,10 +80,9 @@ class Action:
 
 def stop_wait_s() -> float:
     """On SIGTERM/SIGINT, how long the cancelled action may take to end: self.arm's worst settle
-    in end_action() (GOAL_ACCEPT_S + CANCEL_SETTLE_S + 2 * CLOSE_STREAM_WAIT_S, from the arm.*
-    parameters; 7.4 s by default) plus STOP_MARGIN_S. docker stop's grace (10 s) must cover it."""
-    a = arm_module
-    return a.GOAL_ACCEPT_S + a.CANCEL_SETTLE_S + 2 * a.CLOSE_STREAM_WAIT_S + STOP_MARGIN_S
+    (ArmInterface.worst_settle_s(), 7.8 s by default) plus STOP_MARGIN_S. docker stop's grace
+    (10 s) must cover it."""
+    return ArmInterface.worst_settle_s() + STOP_MARGIN_S
 
 
 class Cancelled(Exception):
@@ -458,7 +456,7 @@ class CapabilityEngine(Node):
             ctx = Context(self, goal_handle, run)
             try:
                 # Follow-up: ExecuteAction carries no control token yet, so self.arm sends none.
-                self.arm.begin_action(ctx, token=None, scope=run.scope)
+                self.arm.begin_action(ctx, token=None)
                 params = json.loads(goal.params_json or "{}")
                 payload = self.execute(goal.action_id, params, ctx)
                 result.status = Result.STATUS_SUCCESS
@@ -477,9 +475,9 @@ class CapabilityEngine(Node):
             finally:
                 try:
                     try:
-                        self.arm.end_action()  # settles self.arm's goals and stream
+                        self.arm.end_action()  # settles its goals and stream, closes its scope
                     finally:
-                        run.scope.close()  # destroys every entity of this action
+                        run.scope.close()  # destroys the capability's entities of this action
                 except Exception as error:  # the run must still end and report its result
                     result.status = Result.STATUS_FAILED
                     result.error_code = "exception"

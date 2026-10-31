@@ -178,3 +178,14 @@ def test_goal_halted_without_token_does_nothing():
     status(ds, owner="teleop")
     ds.on_goal_halted()
     ds.check_command()
+
+
+def test_refused_is_an_arm_error_and_covers_the_estop():
+    """RammpArm's methods return False for a Refused; `except ArmError` still catches it."""
+    assert issubclass(driver_state.Refused, driver_state.ArmError)
+    assert issubclass(EStopped, driver_state.Refused)
+    ds = DriverState()
+    status(ds, enforced=True, owned=True, owner="x")
+    assert ds.refusal("me") == ("the arm is owned by 'x'", False)
+    status(ds, estopped=True)
+    assert ds.refusal("me") == ("arm is E-STOPPED -- clear it first", True)

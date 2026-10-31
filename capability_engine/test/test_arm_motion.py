@@ -8,6 +8,7 @@ import pytest
 from fake_driver import FakeCtx, counts
 from rammp_arm import TOOL_Z
 from rammp_arm_interfaces.msg import ImpedanceGains
+from rclpy.action.client import ClientGoalHandle
 from scipy.spatial.transform import Rotation as R
 
 from capability_engine import sim
@@ -256,6 +257,44 @@ def test_end_action_cancels_a_running_goal(arm_env):
     assert not motion.is_alive()
     assert result == [False]
     assert arm.last_error == "action ended"
+
+
+def test_two_end_actions_at_once_both_wait_for_the_settle(arm_env, monkeypatch):
+    """Two threads end the action while its goal runs: neither raises, the goal is cancelled
+    once, and each returns only after the goal has settled and the scope is closed."""
+    arm, node, fake = arm_env
+    fake.hold_goals(HOLD_S)
+    base = counts(node)
+    cancels = []
+    cancel = ClientGoalHandle.cancel_goal_async
+    monkeypatch.setattr(
+        ClientGoalHandle, "cancel_goal_async", lambda gh: cancels.append(gh) or cancel(gh)
+    )
+    arm.begin_action(FakeCtx(), None)
+    motion = threading.Thread(target=arm.move_joints, args=([[0.3] * 7],), daemon=True)
+    motion.start()
+    deadline = time.monotonic() + HOLD_S
+    while not fake.running() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert fake.running(), "the goal never started"
+    seen, errors = [], []
+
+    def end():
+        try:
+            arm.end_action()
+        except Exception as e:  # noqa: BLE001 -- the test inspects what was raised
+            errors.append(e)
+        seen.append((fake.running(), counts(node)))  # as end_action() returns
+
+    enders = [threading.Thread(target=end) for _ in range(2)]
+    for t in enders:
+        t.start()
+    for t in enders:
+        t.join(HOLD_S)
+    motion.join(HOLD_S)
+    assert not errors
+    assert len(cancels) == 1
+    assert seen == [(0, base), (0, base)]
 
 
 def test_pause_holds_the_send_until_resume(arm_env):

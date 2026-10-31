@@ -7,10 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 from fake_driver import FakeCtx, counts
-from rclpy.callback_groups import ReentrantCallbackGroup
 
 from capability_engine import arm as arm_module
-from capability_engine.action_scope import ActionScope
 from capability_engine.driver_state import ArmError, NotInAction, StateTimeout
 
 STRESS_CYCLES = 200  # actions in test_end_action_while_state_streams_in
@@ -23,6 +21,7 @@ SHEPPY_NO_STATE = (
 )
 
 LINGER_S = 0.3  # how long the no-state-after-the-end test waits for late messages
+RACE_HOLD_S = 0.3  # the begin/end race test: how long the ending thread is held mid-end
 
 
 def test_no_resources_until_first_call(arm_env):
@@ -151,20 +150,28 @@ def test_state_timeout_keeps_rammp_arms_message(arm_env, monkeypatch):
     assert isinstance(raised.value, RuntimeError)  # what RammpArm's callers catch
 
 
-def test_end_action_between_check_and_open(arm_env, monkeypatch):
-    arm, node, _ = arm_env
+def test_end_action_while_an_entity_is_made(arm_env, monkeypatch):
+    """Another thread's end_action() lands just after a call's in-action check, as it makes the
+    action's first entity: the check and the making are one guarded step, so the entity is
+    made before the end (and destroyed by it), and the call raises NotInAction."""
+    arm, node, fake = arm_env
     base = counts(node)
+    fake.pause_publishing()  # no state: the call is still waiting when the end lands
     arm.begin_action(FakeCtx(), None)
-    arm.get_state()
+    ender = threading.Thread(target=arm.end_action)
     check = arm._check_in_action
 
-    def check_then_end():  # another thread's end_action() lands between the check and the lock
-        check()
-        arm.end_action()
+    def check_then_end(*args):
+        check(*args)
+        if ender.ident is None:
+            ender.start()
+            time.sleep(0.1)  # end_action() is under way before the entity is made
 
     monkeypatch.setattr(arm, "_check_in_action", check_then_end)
     with pytest.raises(NotInAction):
         arm.get_state()
+    ender.join(WAKE_LIMIT_S)
+    assert not ender.is_alive()
     assert counts(node) == base
 
 
@@ -201,16 +208,56 @@ def test_begin_action_ends_an_unended_action(arm_env):
     assert counts(node) == base
 
 
-def test_no_state_is_stored_after_the_action_ends(arm_env):
-    """Under the engine, the action's scope closes only after end_action(): a message arriving in
-    between must not be kept, or the next action would start from the last one's state."""
-    arm, node, _ = arm_env
-    scope = ActionScope(node, ReentrantCallbackGroup())
-    arm.begin_action(FakeCtx(), None, scope)
+def test_end_action_racing_begin_action_leaves_a_whole_action_or_none(arm_env, monkeypatch):
+    """end_action() in another thread while begin_action() sets the next action up: the arm is
+    left with that action whole, or with none, never in an action with no scope or ctx."""
+    arm, _, _ = arm_env
+    arm.begin_action(FakeCtx(), None)
+    ender, settling = threading.Thread(target=arm.end_action), threading.Event()
+    settle, make_driver = arm._settle, arm_module.DriverState
+
+    def slow_settle():
+        if threading.current_thread() is ender:
+            settling.set()
+            time.sleep(RACE_HOLD_S)  # begin_action() sets up meanwhile, unless it holds the lock
+        settle()
+
+    def driver(**kwargs):  # in begin_action(), after it has ended the last action
+        if ender.ident is None:
+            ender.start()
+            settling.wait(RACE_HOLD_S)
+        return make_driver(**kwargs)
+
+    monkeypatch.setattr(arm, "_settle", slow_settle)
+    monkeypatch.setattr(arm_module, "DriverState", driver)
+    arm.begin_action(FakeCtx(), None)
+    ender.join()
+    assert arm._in_action == (arm._scope is not None) == (arm._ctx is not None)
+
+
+def test_no_state_is_stored_after_the_action_ends(arm_env, monkeypatch):
+    """end_action() closes the scope only after it settles: a message arriving in between must
+    not be kept, or the next action would start from the last one's state."""
+    arm, _, _ = arm_env
+    arm.begin_action(FakeCtx(), None)
+    arm.get_state()
+    settle, received = arm._settle, {}
+
+    def slow_settle():
+        received["at_end"] = {topic: t for topic, (_, t) in arm._latest.items()}
+        time.sleep(LINGER_S)  # the fake keeps publishing to the still-open subscriptions
+        received["after"] = {topic: t for topic, (_, t) in arm._latest.items()}
+        settle()
+
+    monkeypatch.setattr(arm, "_settle", slow_settle)
+    arm.end_action()
+    assert received["after"] == received["at_end"]
+
+
+def test_end_action_holds_nothing_of_the_action(arm_env):
+    arm, _, _ = arm_env
+    arm.begin_action(FakeCtx(), None)
     arm.get_state()
     arm.end_action()
-    try:
-        time.sleep(LINGER_S)  # the fake keeps publishing to the still-open subscriptions
-        assert not arm._latest
-    finally:
-        scope.close()
+    assert arm._ctx is None and arm._scope is None and arm._stream is None
+    assert not arm._entities and not arm._latest and not arm._goals

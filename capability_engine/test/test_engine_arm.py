@@ -64,7 +64,7 @@ INTERRUPT_AFTER_S = 0.3  # when the lifecycle tests interrupt a running action
 START_WAIT_TEST_S = 0.2  # START_WAIT_S in the never-started test
 # The stuck-action test's stop budget, set through the arm.* parameters it is computed from.
 FAST_SETTLE_ARGS = ["-p", "arm.goal_accept_s:=0.1", "-p", "arm.cancel_settle_s:=0.1"]
-FAST_SETTLE_ARGS += ["-p", "arm.close_stream_wait_s:=0.1"]
+FAST_SETTLE_ARGS += ["-p", "arm.close_stream_wait_s:=0.1", "-p", "arm.go_to_settle_s:=0.1"]
 EXECUTE_DELAY_S = 0.5  # how long the two-goal test holds back each goal's execute
 
 
@@ -910,10 +910,12 @@ def test_a_late_acceptance_does_not_take_over_the_next_run(env, monkeypatch):
 
 def test_the_stop_budget_follows_the_arm_parameters(env):
     """A profile that lets self.arm wait longer gets a longer stop, not an exit mid-settle."""
-    env.make(lambda engine, ctx: None, **{"arm.goal_accept_s": 10.0})
+    params = {"arm.goal_accept_s": 10.0, "arm.halt_status_wait_s": 2.0}
+    env.make(lambda engine, ctx: None, **params)
     assert engine_module.stop_wait_s() == pytest.approx(
-        10.0
-        + arm_module.CANCEL_SETTLE_S
+        2.0  # the running call's settle: the longest of its waits, here the HALTED one
+        + 10.0
+        + arm_module.CANCEL_SETTLE_S  # end_action()'s
         + 2 * arm_module.CLOSE_STREAM_WAIT_S
         + engine_module.STOP_MARGIN_S
     )

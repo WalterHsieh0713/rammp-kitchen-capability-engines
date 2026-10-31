@@ -11,7 +11,7 @@ from rclpy.action.client import ClientGoalHandle
 
 from capability_engine import arm as arm_module
 from capability_engine.arm import HOLD_LEVEL, IMPEDANCE, LATEST_WINS, GoalFeedback
-from capability_engine.driver_state import ArmError, NotInAction
+from capability_engine.driver_state import ArmError, DriverState, NotInAction
 from capability_engine.engine import Cancelled
 
 HOLD_S = 5.0  # how long the fake runs a goal in the tests that need one running
@@ -280,6 +280,30 @@ def test_end_action_while_the_goal_is_accepted_cancels_it(arm_env):
     assert result == [False]
     assert arm.last_error == "action ended"
     assert not arm._goals
+
+
+@pytest.fixture
+def end_just_before_the_send(arm_env, monkeypatch):
+    """(arm, fake), with end_action() landing after a goal's server wait, before its send."""
+    arm, _, fake = arm_env
+    begin_goal = DriverState.begin_goal
+
+    def end_then_begin(driver, name):
+        arm.end_action()
+        begin_goal(driver, name)
+
+    monkeypatch.setattr(DriverState, "begin_goal", end_then_begin)
+    arm.begin_action(FakeCtx(), None)
+    return arm, fake
+
+
+def test_the_driver_api_whose_action_ends_before_the_send_is_not_in_action(
+    end_just_before_the_send,
+):
+    arm, fake = end_just_before_the_send
+    with pytest.raises(NotInAction):
+        arm.execute_joint_trajectory(["arm_joint_1"], [(1.0, [0.1], [0.0])])
+    assert not fake.goals["execute_joint_trajectory"]
 
 
 def test_execute_joint_trajectory_ended_action_is_not_in_action(arm_env):
