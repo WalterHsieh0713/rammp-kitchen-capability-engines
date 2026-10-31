@@ -41,7 +41,9 @@ from rammp_arm import ERRORS, JOINTS
 from rammp_arm_interfaces.action import (
     ExecuteJointTrajectory,
     GoToEEPose,
+    GoToEEPoses,
     GoToJointConfig,
+    GoToJointConfigs,
     GoToPreset,
 )
 from rammp_arm_interfaces.msg import (
@@ -98,6 +100,8 @@ ACTIONS = {
     "execute_joint_trajectory": (ExecuteJointTrajectory, "/execute_joint_trajectory"),
     "go_to_ee_pose": (GoToEEPose, "/go_to_ee_pose"),
     "go_to_joint_config": (GoToJointConfig, "/go_to_joint_config"),
+    "go_to_ee_poses": (GoToEEPoses, "/go_to_ee_poses"),
+    "go_to_joint_configs": (GoToJointConfigs, "/go_to_joint_configs"),
     "go_to_preset": (GoToPreset, "/go_to_preset"),
     "plan_to_pose": (PlanToPose, "/rammp_curobo/plan_to_pose"),
     "plan_to_joints": (PlanToJoints, "/rammp_curobo/plan_to_joints"),

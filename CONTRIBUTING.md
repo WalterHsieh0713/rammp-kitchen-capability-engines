@@ -72,6 +72,38 @@ as the students' `SheppyArm` (`get_state`, `move_joints`, `move_cartesian`,
 they are sent. Use it inside `execute()`: the arm's ROS resources exist from the
 first arm call to the end of that `execute()`.
 
+**Several targets in one motion.** Each `go_to_*` call plans from rest and
+stops dead at its goal. `go_to_ee_poses` (a list of `PoseTarget`) and
+`go_to_joint_configs` (a list of `JointTarget`) send all their targets as ONE
+goal to the driver. It plans every leg and blends them, so the arm passes a
+target without stopping wherever its `blend_radius` (m) lets the tool cut the
+corner:
+
+```python
+from capability_engine.arm import HOLD_FIXED, PoseTarget
+
+self.arm.go_to_ee_poses(
+    [
+        PoseTarget(view_pos, grasp_quat, blend_radius=0.05),
+        PoseTarget(grasp_pos, grasp_quat, hold=HOLD_FIXED, speed_scale=0.2),
+    ],
+    "to the grasp",
+)
+```
+
+Each target has its own `hold` and `speed_scale` (default `GO_TO_SPEED_SCALE`);
+`control_mode` and `gains` are one for the whole motion. A hold is checked
+against where the arm is when its leg starts. So a held first target must keep
+the tool's current orientation (its tilt under `HOLD_LEVEL`), as for
+`go_to_ee_pose`, and a later held target must keep the previous target's. Give
+both the same quat, as above, or the leg can fail with `PLANNING_FAILED leg 2/2`.
+A radius of 0, and the last target, stop. A radius above 0 lets the planner cut
+the corner, but it may still stop there. With a radius above 0 a `JointTarget`'s joints are only passed
+near, not reached. The call returns `True` or `False` and raises like
+`go_to_ee_pose`, and its end check is against the last target. cuRobo checks
+every cut corner for collisions in its world. Near something that isn't in that
+world, keep the radius small.
+
 **What a motion can raise.** `RammpArm`'s methods return `False` for a refused
 or failed motion, an e-stop included, as they always did. On top of that, any
 motion can raise:

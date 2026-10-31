@@ -71,7 +71,7 @@ def test_image_outside_capability_namespace_fails(repo):
 def test_unpinned_base_fails(repo, base):
     dockerfile = repo / "Dockerfile"
     dockerfile.write_text(
-        dockerfile.read_text().replace("ghcr.io/rammp-org/rammp-base:nightly-20261027", base)
+        dockerfile.read_text().replace("ghcr.io/rammp-org/rammp-base:nightly-20261030", base)
     )
     assert f"FROM {base}" in errors(repo)
 
