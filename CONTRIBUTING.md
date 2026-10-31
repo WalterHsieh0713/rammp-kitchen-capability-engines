@@ -63,3 +63,86 @@ changed without editing the manifest. sheppy appends
 `ros2 launch`; `validate_fragment.py` enforces both. Large configuration ships in
 the image, chosen by a parameter. See
 [Configuring a deployment](https://rammp-org.github.io/configuring-a-deployment).
+
+## Using `self.arm`
+
+Every `CapabilityEngine` has `self.arm`, an `ArmInterface` with the same methods
+as the students' `SheppyArm` (`get_state`, `move_joints`, `move_cartesian`,
+`gripper`, `go_to_ee_pose`, ...), plus a sim of the arm for checking poses before
+they are sent. Use it inside `execute()`: the arm's ROS resources exist from the
+first arm call to the end of that `execute()`.
+
+**What a motion can raise.** `RammpArm`'s methods return `False` for a refused
+or failed motion, an e-stop included, as they always did. On top of that, any
+motion can raise:
+
+- `Cancelled`: the orchestrator cancelled the action (the goal or stream is
+  stopped first);
+- `ControlTaken`: another sender took control of the arm mid-action;
+- `StreamClosed`: the driver closed your `stream(...)` session;
+- `NotInAction`: an arm call outside `execute()`, or `send()` outside its
+  `with` block;
+- `EStopped`: the driver API (`execute_joint_trajectory`, `stream`, `send`)
+  while the arm is e-stopped.
+
+Import them from the package, as in
+`from capability_engine import Cancelled, ControlTaken`. All but `Cancelled` are
+`ArmError`s.
+
+**Rules for the sim.** One sim per process, shared with `self.arm`, built from
+the driver's own model. These rules keep your checks and the arm in agreement:
+
+- Get the sim from `make_sim()` (`capability_engine.sim`). Never build your own
+  PyBullet world or pass a different URDF while the driver is up.
+- Call `make_sim()` for the first time inside `execute()`: the model comes from
+  the driver through `self.arm`, which is only available in an action. Later
+  calls, anywhere, return the same copy.
+- If you checked joints, send joints (`move_joints`). If you send poses
+  (`move_cartesian`), check them with `cartesian_knots` on the shared sim, not
+  with your own IK: a different solver may land on different joints.
+- Look poses up in `rammp_arm.FRAME`, not a hard-coded frame. `arm_mount` and
+  `arm_base_link` agree on dojo and are 30 degrees apart on flatbot and gen_1_5.
+- Settable values are set through functions, not by assigning to a re-export:
+  turn the keep-out on with `set_keep_out(fn)`. Speeds such as
+  `rammp_arm.CART_SPEED *= s` are fine.
+
+**Control comes from the orchestrator.** It grants the arm when it starts your
+action. Never call `/acquire_control`, `/release_control` or `/revoke_control`, and
+never publish `/estop`: the orchestrator and other nodes own them, and `self.arm`
+has no way to. It only reads them: it refuses commands while the arm is e-stopped
+and raises `ControlTaken` when another sender takes the arm.
+
+**Your own topics: subscribe only during the action.** An idle subscription still
+costs CPU for every message it receives (about 2 ms each on the Orin:
+Demo-Software #263), so a camera or detections subscription should exist only
+while an action needs it. Make it inside `execute()` with
+`self.create_action_subscription(...)` (and `self.create_action_publisher(...)`,
+`self.create_action_tf_buffer()` in place of a `TransformListener`): the same
+arguments as rclpy's, and the engine destroys them when the action ends. Do not
+destroy subscriptions yourself: on Humble, destroying one while the executor
+spins can crash the node, and the engine does it in the safe order. Plain
+`self.create_subscription()` still works for what the node needs all its life.
+
+**Cancel ends the action promptly.** Call `ctx.checkpoint()` between steps and keep
+each step short: on a cancel or a stop (`docker stop`), `self.arm` cancels its
+motion at once, but your own code ends only at its next checkpoint, and a stop
+waits at most a few seconds for it.
+
+**No `print`.** Ruff forbids it. When you migrate a student script, turn each
+`print(msg)` into `self.get_logger().info(msg)` (`warn`/`error` where it was a
+warning or failure) with the same message text.
+
+**Parameters.** Every tunable of `self.arm` is a ROS parameter `arm.<name>` whose
+default is the students' value: speeds, tolerances, timeouts, IK guards. They are
+read once at startup (a change needs a restart) and are listed with their meaning
+in [`capabilities/example/docs/interface.md`](capabilities/example/docs/interface.md);
+copy that table and the `arm.*` keys under `params:` in the real fragment into
+your capability. A test checks the example's fragment and table against
+`capability_engine/arm_params.py`. In mock runs (`mock:=true`) there is no
+driver, so no model: set `arm.mock_urdf` to the URDF file `make_sim()` should
+load (and `arm.mock_joints` for where the arm starts). Launch files take it as
+`mock_urdf:=/path/robot.urdf`; native runs can also use `--ros-args -p arm.mock_urdf:=...`.
+Two values are deliberately not in the fragment: `arm.sender_id` defaults to the
+engine id, and `rammp_arm.IMPEDANCE` is the one `RammpArm` value that is not an
+`arm.*` parameter at all, because it is only used when a caller passes it
+(`move_joints(..., impedance=IMPEDANCE)`).

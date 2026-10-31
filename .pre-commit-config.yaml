@@ -12,6 +12,8 @@ repos:
       - id: check-xml
       - id: pretty-format-json
         args: [--autofix]
+        # Kept compact: indented, the recorded goldens would exceed the size limit.
+        exclude: 'tests/arm/fixtures/sheppy_goldens\.json$'
       - id: check-merge-conflict
       - id: detect-private-key
       # Commits land on dev and main only through PRs. CI sets

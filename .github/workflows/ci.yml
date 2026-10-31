@@ -35,7 +35,7 @@ jobs:
         run: pip install pyyaml pytest "sheppy @ git+https://github.com/rammp-org/sheppy@main"
 
       - name: Unit-test the checkers
-        run: pytest -q tests
+        run: pytest -q tests --ignore=tests/arm
 
       - name: Check every capability against the repo rules and sheppy
         run: python3 scripts/check_capabilities.py
@@ -45,6 +45,15 @@ jobs:
         run: |
           echo "capabilities=$(find capabilities -mindepth 1 -maxdepth 1 -type d -printf '%f\n' \
             | sort | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  # self.arm: pure-Python and rclpy tests in the x86 test image (docker/test.Dockerfile).
+  arm-tests:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the test image and run the arm tests
+        run: make test-arm
 
   smoke:
     needs: checks
@@ -105,10 +114,12 @@ jobs:
   # The single check the branch rulesets require, so adding a capability (a
   # new matrix entry) never needs a ruleset edit.
   ci-ok:
-    needs: [checks, smoke]
+    needs: [checks, arm-tests, smoke]
     if: always()
     runs-on: ubuntu-22.04
     steps:
       - name: All capability jobs passed
         run: |
-          [ "${{ needs.checks.result }}" = success ] && [ "${{ needs.smoke.result }}" = success ]
+          [ "${{ needs.checks.result }}" = success ] \
+            && [ "${{ needs.arm-tests.result }}" = success ] \
+            && [ "${{ needs.smoke.result }}" = success ]
