@@ -24,6 +24,73 @@ make smoke CAP=button_press   # publishes what it declares, exits on SIGTERM
 make lint                     # pre-commit run --all-files
 ```
 
+## Development flow
+
+A capability goes from a working script to a deployed demo in five steps. Each
+step is usually its own PR into `dev`.
+
+1. **Port it and test it.** `make new CAP=<name>`, then move the existing
+   script into the capability's `execute()`. Each complete behavior (open the
+   microwave, press the button) becomes one `Action`. `self.arm` carries the
+   Cornell feeding-deployment API (`move_joints`, `move_cartesian`,
+   `execute_command`, the PyBullet sim), so a script written against it runs
+   with few changes. Test it in mock, then on the arm.
+1. **Switch to the driver API.** Replace legacy moves with the `go_to_*`
+   methods (cuRobo plans a collision-free path, the driver runs it) and, where
+   you need more control, the driver methods (`execute_joint_trajectory`,
+   `stream`). See [`self.arm`](#selfarm-arminterface). If a move stays on the
+   legacy API, say why in the PR.
+1. **Make it look good.** Once it works: chain consecutive moves into one
+   motion with `go_to_ee_poses` / `go_to_joint_configs` and a `blend_radius`,
+   so the arm doesn't stop at every waypoint; drop needless pauses; tune
+   speeds.
+1. **Publish the image.** Merging to `dev` publishes
+   `ghcr.io/rammp-org/rammp-kitchen-capability-engines/<name>:dev` and a
+   `sha-` tag; a `v*` tag publishes a release. After an attended hardware
+   pass, set `tier: demo-ready` and pin the image to the release.
+1. **Deploy it.** Open a PR to
+   [`rammp-deployments`](https://github.com/rammp-org/rammp-deployments) that
+   adds the capability to `december_2026/sheppy-manifest.yaml` as a node with
+   its real and mock alternatives, and selects it in the demo profiles.
+
+PRs follow the [template](.github/pull_request_template.md). Say how the
+implementation works (the motion sequence, which perception it uses and how it
+gets targets from it, how a failure or cancel leaves the arm), and what was
+tested where: mock, sim or hardware, how many runs, how many succeeded, and why
+the others failed. Reviewers check against
+[`REVIEW_RULES.md`](https://github.com/rammp-org/rammp-deployments/blob/dev/REVIEW_RULES.md).
+
+### Perception you can use
+
+Perception already runs on the robot
+([`rammp-perception`](https://github.com/rammp-org/rammp-perception), deployed
+by `december_2026/sheppy-manifest.yaml`). Use it instead of running your own
+detector; if you need a model it doesn't have, say so in the PR.
+
+| Topic or service                                                        | What it is                                                                                                                                        |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/perception/object_detections`                                         | Always-on scene segmenter (RF-DETR or YOLOE): `ObjectDetections` with class, score, box, mask and a stable `instance_id` such as `microwave_2`    |
+| `/perception/object_detections_3d`                                      | The same objects with a gravity-aligned 3D box (pose and size, in the camera's optical frame), from BoxerNet                                      |
+| `/perception/sam3/{detect,start_tracking,stop_tracking,renew_tracking}` | SAM3 on demand: detect from a prompt (~0.4-0.9 s), or open a tracking session that streams on `/perception/sam3/object_detections`; stop it after |
+| `/scene_camera/...`, `/wrist_camera/...`                                | The cameras' color, depth and `camera_info`                                                                                                       |
+
+The classes are food container, drink cup, fridge, microwave and table. The
+message types are in `rammp_perception_interfaces`
+([`rammp-interfaces-ros2`](https://github.com/rammp-org/rammp-interfaces-ros2)).
+Subscribe to these only inside `execute()` (see
+[Using `self.arm`](CONTRIBUTING.md#using-selfarm)).
+
+### Related repositories
+
+| Repository                                                            | What it is                                                                                                                       |
+| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| [rammp-deployments](https://github.com/rammp-org/rammp-deployments)   | What runs on each robot: the sheppy manifest, profiles, robot config, and the review rules. Start here to see how a node is used |
+| [rammp-orchestrator](https://github.com/rammp-org/rammp-orchestrator) | The orchestrator that registers engines, starts their actions and holds the world state                                          |
+| [sheppy](https://github.com/rammp-org/sheppy)                         | Launch tooling: starts each node's real or mock alternative from a manifest and a profile                                        |
+| [rammp-org.github.io](https://rammp-org.github.io)                    | Project docs: setup, development workflow, patterns, publishing, interfaces                                                      |
+| [rammp-perception](https://github.com/rammp-org/rammp-perception)     | The perception nodes above                                                                                                       |
+| kinova-gen3-driver, kinova-gen3-ros2, rammp-curobo                    | The arm driver, its ROS 2 wrapper and the cuRobo planner, all behind `self.arm`. You should not need to change them              |
+
 ## Standalone or with the orchestrator
 
 Every capability is a `capability_engine.CapabilityEngine`: it implements the
@@ -192,6 +259,12 @@ Use `self.arm` only inside `execute()`. Anywhere else, a call raises
 
 It has two sets of methods. Both talk to the same arm driver, but they report
 failure differently.
+
+Write new code against the driver: the `go_to_*` methods, where cuRobo plans
+the path and the driver runs it, and the driver methods for anything they can't
+do. `move_joints`, `move_cartesian`, `execute_command` and the PyBullet sim
+(`capability_engine.sim`) are the Cornell feeding-deployment API. They are here
+so ported scripts run unchanged; move off them once the port works.
 
 **The `RammpArm` methods** are the ones the microwave students wrote against.
 A motion returns `True` when it succeeds. It returns `False` when the arm refuses
