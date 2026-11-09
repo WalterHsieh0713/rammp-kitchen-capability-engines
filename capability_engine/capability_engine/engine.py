@@ -259,8 +259,31 @@ class CapabilityEngine(Node):
     # -- what a capability implements ---------------------------------------
 
     def availability(self, instance_id: str, world_state: dict) -> list[ActionAvailability]:
-        """Which actions can run on this object now. Default: all of them."""
-        return [ActionAvailability(action_id=a.action_id, available=True) for a in self.actions]
+        """Which actions can run on this object now. Default: every action
+        whose own `perception_classes` applies to this instance's class (or
+        declares none, i.e. applies to every class), all reported
+        available. Mirrors `MockEngine.activate()`'s reference semantics
+        (`rammp-orchestrator`'s `mocks/mock_engine.py`): an action whose
+        `perception_classes` doesn't include this instance's class is
+        omitted entirely (not just marked unavailable), since it doesn't
+        apply to this object at all, not merely blocked right now -- e.g. a
+        fridge-only action on a selected microwave instance. The instance's
+        class is looked up from `world_state["objects"][instance_id]
+        ["perception_class"]`; unknown (not yet reported by Perception, or
+        no such key) falls back to offering every action, same as
+        `MockEngine`. Object-state-dependent gating (e.g. "open" unavailable
+        once already open) is not implemented here -- override this method
+        to add it, using `world_state` the same way."""
+        instance = world_state.get("objects", {}).get(instance_id, {})
+        instance_class = instance.get("perception_class")
+        availability = []
+        for a in self.actions:
+            if a.perception_classes and instance_class is not None and (
+                instance_class not in a.perception_classes
+            ):
+                continue
+            availability.append(ActionAvailability(action_id=a.action_id, available=True))
+        return availability
 
     def execute(self, action_id: str, params: dict, ctx: Context) -> dict:
         """Run one action. Return the result payload; raise EngineError to fail.
