@@ -9,10 +9,12 @@
 
 ## What it does
 
-The reference capability. It offers one action, `count`, which counts up to
-`to` with progress feedback and honours pause and cancel. It is activated when
-the user selects a `counter`. Replace this paragraph with what your capability
-does and what would break without it.
+The reference capability. It offers two actions: `count`, which counts up to
+`to` with progress feedback and honours pause and cancel, and
+`count_with_panel`, the same but also driving a live progress panel (with a
+Stop button) directly on the UI bridge. It is activated when the user selects
+a `counter`. Replace this paragraph with what your capability does and what
+would break without it.
 
 ## Publishes
 
@@ -37,9 +39,10 @@ Served under `/example/`, types from `rammp_orchestrator_interfaces`:
 | `/example/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/example/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action  | Params                                                | Result payload      |
-| ------- | ----------------------------------------------------- | ------------------- |
-| `count` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}` |
+| Action             | Params                                                | Result payload                               |
+| ------------------ | ----------------------------------------------------- | --------------------------------------------- |
+| `count`            | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}`                           |
+| `count_with_panel` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n, "stopped_by_user"?: true}` |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.
