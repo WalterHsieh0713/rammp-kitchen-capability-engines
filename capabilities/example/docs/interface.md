@@ -39,7 +39,7 @@ Served under `/example/`, types from `rammp_orchestrator_interfaces`:
 | `/example/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/example/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action             | Params                                                | Result payload                               |
+| Action             | Params                                                | Result payload                                |
 | ------------------ | ----------------------------------------------------- | --------------------------------------------- |
 | `count`            | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}`                           |
 | `count_with_panel` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n, "stopped_by_user"?: true}` |

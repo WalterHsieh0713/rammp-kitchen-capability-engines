@@ -285,10 +285,16 @@ class CapabilityEngine(Node):
             Hibernate, "~/hibernate", self._on_hibernate, callback_group=self._group
         )
         self.create_service(
-            AcquireControl, "~/acquire_control", self._on_acquire_control, callback_group=self._group
+            AcquireControl,
+            "~/acquire_control",
+            self._on_acquire_control,
+            callback_group=self._group,
         )
         self.create_service(
-            ReleaseControl, "~/release_control", self._on_release_control, callback_group=self._group
+            ReleaseControl,
+            "~/release_control",
+            self._on_release_control,
+            callback_group=self._group,
         )
         ActionServer(
             self,
@@ -326,7 +332,9 @@ class CapabilityEngine(Node):
         )
         # One shared topic, not per-engine -- see EngineOverlayImage.msg's own
         # doc comment; the bridge tells engines apart by the token on each frame.
-        self._ui_overlay_pub = self.create_publisher(EngineOverlayImage, "/engine_overlay/image_raw", 10)
+        self._ui_overlay_pub = self.create_publisher(
+            EngineOverlayImage, "/engine_overlay/image_raw", 10
+        )
 
         self._status = self.create_publisher(String, "~/status", 10)
         self.create_timer(1.0, self._publish_status, callback_group=self._group)
@@ -359,8 +367,10 @@ class CapabilityEngine(Node):
         instance_class = instance.get("perception_class")
         availability = []
         for a in self.actions:
-            if a.perception_classes and instance_class is not None and (
-                instance_class not in a.perception_classes
+            if (
+                a.perception_classes
+                and instance_class is not None
+                and (instance_class not in a.perception_classes)
             ):
                 continue
             availability.append(ActionAvailability(action_id=a.action_id, available=True))
@@ -521,7 +531,9 @@ class CapabilityEngine(Node):
             goal_handle = run.ui_goal_handle
         if goal_handle is not None:
             if not wait_until(self._ui_update_client.service_is_ready, CALL_TIMEOUT_S, ctx):
-                self.get_logger().warning("ui_bridge_node's ~/request_user_input/update unavailable")
+                self.get_logger().warning(
+                    "ui_bridge_node's ~/request_user_input/update unavailable"
+                )
                 return False
             future = self._ui_update_client.call_async(
                 UpdateUserInputPanel.Request(
@@ -537,7 +549,9 @@ class CapabilityEngine(Node):
             # Most likely the goal just ended (a button press, or the bridge
             # force-aborted it) since we last checked -- fall through to open a
             # fresh one below, same as if this were the first call.
-            self.get_logger().info(f"update_user_panel update refused, reopening: {response.message}")
+            self.get_logger().info(
+                f"update_user_panel update refused, reopening: {response.message}"
+            )
             with run.ui_lock:
                 run.ui_goal_handle = None
 
