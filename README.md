@@ -269,6 +269,9 @@ All three return `False` (a no-op, logged) if this run holds no session token
 (e.g. standalone with no orchestrator) or the bridge is unreachable/rejects the
 request.
 
+See [`docs/UI_JSON_SCHEMA.md`](docs/UI_JSON_SCHEMA.md) for the full
+`panel_json`/`objects`/`poll_ui_event()` JSON shapes.
+
 ### `self.arm` (`ArmInterface`)
 
 Use `self.arm` only inside `execute()`. Anywhere else, a call raises
