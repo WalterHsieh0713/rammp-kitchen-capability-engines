@@ -31,6 +31,8 @@ class Capability(CapabilityEngine):
             "interval_s": {"type": "number", "minimum": 0, "default": 1.0},
         },
     }
+    # _wait_for_stop()'s poll/checkpoint step while waiting out an interval.
+    _UI_POLL_PERIOD_S = 0.1
     actions = [
         Action("count", "Count up", params_schema=_COUNT_PARAMS_SCHEMA),
         Action("count_with_panel", "Count up (live panel)", params_schema=_COUNT_PARAMS_SCHEMA),
@@ -93,14 +95,39 @@ class Capability(CapabilityEngine):
                     "buttons": [{"button_id": "stop", "label": "Stop"}],
                 }
             )
-            event = ctx.poll_ui_event()
-            if event is not None and event.get("type") == "button" and event["button_id"] == "stop":
+            # Poll for Stop throughout the interval, including on the last
+            # iteration, instead of only once beforehand and then sleeping
+            # through it uninterrupted -- otherwise a tap during any
+            # interval is never consumed and the action reports normal
+            # success.
+            event = self._wait_for_stop(interval, ctx)
+            if event is not None:
                 self.get_logger().info(f"count_with_panel: user pressed Stop at {n}/{to}")
                 return {"counted_to": n, "stopped_by_user": True}
-            time.sleep(interval)
             ctx.progress("counting", pct, f"{n}/{to}")
 
         return {"counted_to": to}
+
+    def _wait_for_stop(self, duration: float, ctx) -> dict | None:
+        """Sleeps `duration` seconds in short steps, checkpointing (honours
+        pause/cancel) and polling for the Stop button throughout -- not just
+        once beforehand -- so a tap during any interval, including the
+        action's last one, is never missed. Returns the Stop event as soon as
+        it's seen, else None once the full duration has elapsed."""
+        deadline = time.monotonic() + duration
+        while True:
+            ctx.checkpoint()
+            event = ctx.poll_ui_event()
+            if (
+                event is not None
+                and event.get("type") == "button"
+                and event.get("button_id") == "stop"
+            ):
+                return event
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            time.sleep(min(self._UI_POLL_PERIOD_S, remaining))
 
 
 def main():
