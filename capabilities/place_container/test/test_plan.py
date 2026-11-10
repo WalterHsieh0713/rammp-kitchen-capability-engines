@@ -107,6 +107,9 @@ def test_contact_arms_after_the_ignored_drop():
     u = plan.minjerk_time(0.03 / length)
     assert not plan.contact_armed(u - 0.01, length, 0.03) and plan.contact_armed(u + 0.01, length, 0.03)
     assert plan.contact_armed(plan.minjerk_time(0.5) + 0.01, 0.04, 0.03)  # a short line: half of it
+    # a line that starts just above the table: armed CONTACT_ARM_BEFORE above it, not after it
+    assert plan.arm_distance(0.16, 0.08, meet=0.06 / 0.16) == pytest.approx(0.05)
+    assert plan.arm_distance(0.30, 0.03, meet=0.79) == pytest.approx(0.03)  # the long line: unchanged
     line_z = [0.50, 0.40, 0.30]
     assert plan.commanded_z(line_z, 0.0) == pytest.approx(0.50)
     assert plan.commanded_z(line_z, 0.5) == pytest.approx(0.40)
@@ -217,6 +220,22 @@ def test_other_failures_point_at_the_right_fix():
 # -- on the flatbot model ---------------------------------------------------------------------
 
 
+def test_the_approach_takes_the_line_down_to_lower_from():
+    zs = np.round(np.arange(0.50, 0.18 - 1e-9, -plan.PATH_STEP), 6)
+    qs = [np.full(7, z) for z in zs]  # stand-ins: each q tagged by its z
+    table_z, lower_from = 0.20, 0.06
+    approach, (zs2, qs2) = plan.split_approach((zs, qs), table_z, lower_from)
+    end = table_z + plan.BOWL_DEPTH + lower_from
+    assert approach[-1][0] == "approach" and all(n == "approach'" for n, _ in approach[:-1])
+    # the approach ends, and the slow line starts, at `end` (to the 2 mm step, at or above it)
+    assert end - 1e-9 <= approach[-1][1][0] <= end + plan.PATH_STEP + 1e-9
+    assert zs2[0] == approach[-1][1][0]
+    assert np.all(np.diff([q[0] for _, q in approach]) < 0)  # going down
+    assert np.all(np.diff([zs[0]] + [q[0] for _, q in approach]) >= -plan.APPROACH_EVERY - 1e-9)  # every 4 cm
+    off, (zs3, _) = plan.split_approach((zs, qs), table_z, 0.0)
+    assert off == [] and len(zs3) == len(zs)  # off: all of it slow
+
+
 @needs_model
 def test_a_spot_plan_goes_straight_down_in_arm_mount(model):
     q_start = holding_pose(model, SPOT)
@@ -283,10 +302,60 @@ def test_retreat_takes_a_shorter_line_past_the_lip_and_refuses_less(model, monke
             assert len(line) == allowed + 1 and notes[0].startswith("retreat: only")
             back = np.linalg.norm(model.fk(line[-1])[:3, 3] - model.fk(line[0])[:3, 3])
             assert plan.RETREAT_MIN <= back < plan.RETREAT
-        else:
-            with pytest.raises(plan.Refused, match="can't go straight back"):
+        else:  # the swing gets no IK either: refused, saying both
+            with pytest.raises(plan.Refused, match="can't back out.*swing left"):
                 plan.plan_retreat(model, q_start)
     monkeypatch.setattr(model, "ik", ik)
+
+
+@needs_model
+def test_retreat_swings_out_where_the_line_back_runs_out(model, monkeypatch):
+    q_start = holding_pose(model, SPOT)
+    T0, tip0 = model.fk(q_start), model.fk(q_start, "tip")
+    heading = np.array([T0[0, 2], T0[1, 2], 0.0]) / np.hypot(T0[0, 2], T0[1, 2])
+    centre = tip0[:2, 3] + plan.BOWL_RADIUS * heading[:2]
+    ik, start_rot = model.ik, Rotation.from_matrix(T0[:3, :3])
+
+    def no_straight_line(pos, quat, *args, **kwargs):  # the straight line keeps the orientation
+        if (Rotation.from_quat(quat) * start_rot.inv()).magnitude() < 1e-6:
+            return None
+        return ik(pos, quat, *args, **kwargs)
+
+    monkeypatch.setattr(model, "ik", no_straight_line)
+    notes = []
+    line = plan.plan_retreat(model, q_start, log=notes.append)
+    assert "swings out" in notes[0] and "WARNING" in notes[0]  # no straight part: still at the wall
+    T1, tip1 = model.fk(line[-1]), model.fk(line[-1], "tip")
+    yaw = np.degrees(np.arctan2(np.cross(T0[:2, 2], T1[:2, 2]), T0[:2, 2] @ T1[:2, 2]))
+    assert abs(yaw) == pytest.approx(plan.SWING_DEG, abs=2.0)  # turned, seen from above
+    assert abs(T1[2, 3] - T0[2, 3]) < plan.IK_TOL  # at the same height: still straddling the lip
+    assert np.hypot(*(tip1[:2, 3] - centre)) >= plan.BOWL_RADIUS + plan.LIP_WIDTH  # past the lip
+    flange0, flange1 = model.fk(q_start, "flange"), model.fk(line[-1], "flange")
+    assert np.linalg.norm(flange1[:3, 3] - flange0[:3, 3]) < 0.01  # the wrist stays put
+
+
+@needs_model
+def test_retreat_backs_off_the_wall_before_it_swings(model, monkeypatch):
+    q_start = holding_pose(model, SPOT)
+    T0 = model.fk(q_start)
+    ik, start_rot, back = model.ik, Rotation.from_matrix(T0[:3, :3]), -T0[:2, 2] / np.hypot(*T0[:2, 2])
+
+    def short_straight_line(pos, quat, *args, **kwargs):  # the straight line fits only 2 cm
+        straight = (Rotation.from_quat(quat) * start_rot.inv()).magnitude() < 1e-6
+        if straight and (np.asarray(pos)[:2] - T0[:2, 3]) @ back > 0.02 + 1e-6:
+            return None
+        return ik(pos, quat, *args, **kwargs)
+
+    monkeypatch.setattr(model, "ik", short_straight_line)
+    notes = []
+    line = plan.plan_retreat(model, q_start, log=notes.append)
+    assert "backs 2.0 cm, then the hand swings out" in notes[0] and "WARNING" not in notes[0]
+    turned = [
+        np.degrees((Rotation.from_matrix(model.fk(q)[:3, :3]) * start_rot.inv()).magnitude()) for q in line
+    ]
+    first_turn = next(k for k, d in enumerate(turned) if d > 0.5)
+    tip_back = (model.fk(line[first_turn - 1], "tip")[:2, 3] - model.fk(q_start, "tip")[:2, 3]) @ back
+    assert tip_back == pytest.approx(0.02, abs=plan.IK_TOL)  # straight back 2 cm, THEN the turn
 
 
 @needs_model

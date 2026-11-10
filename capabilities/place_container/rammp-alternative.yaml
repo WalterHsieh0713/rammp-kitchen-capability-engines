@@ -40,10 +40,10 @@ params:
   # The hold after contact, this far (m) below the contact point, while the gripper opens.
   hold_press: 0.003
   # Held in impedance at the start this long (s) before going down; must end still. 0 = no pause.
-  settle_s: 3.0
+  settle_s: 0.0
   # Contact is ignored until the descent's command has gone this far down (m): the sag when the arm
   # goes compliant must not read as contact.
-  contact_ignore_m: 0.03
+  contact_ignore_m: 0.08
   # Contact more than this (m) above where the bottom meets the table = not the table.
   early_stop: 0.03
   # Joint impedance for the settle, lowering, hold, retreat and reset (one set: the stiffness never changes
@@ -54,12 +54,12 @@ params:
   # Speeds. The hand's speed where the table should be (m/s): what the contact test was tuned at.
   lower_speed: 0.02
   # The rest is 2x RAMMP-table's: speed_scale of the carrying moves (go_to_ee_poses; and reset's),
-  go_to_speed_scale: 0.4
+  go_to_speed_scale: 0.6
   # of the squaring turn and of reset's joint moves (move_joints),
   adjust_speed_scale: 1.0
   reset_speed_scale: 1.0
   # and the retreat's peak speed (m/s).
-  retreat_speed: 0.06
+  retreat_speed: 0.10
   # reset: curobo = one go_to_joint_configs motion (up, then the start) around the chair's collision
   # volumes, at go_to_speed_scale; legacy = the impedance move_joints moves (no chair check).
   reset_mode: curobo
@@ -78,6 +78,16 @@ params:
   # go_to_joint_config to our checked joints first (if cuRobo swings the hand for the pose), then
   # lift -> transit.
   adjust_mode: pose
+  # With blend: joints = the carrying motion through our planned joints (go_to_joint_configs), so the
+  # arm keeps the start's posture; pose = hand poses, cuRobo picks the joints (it chose another posture
+  # at the spot on 2026-11-10, and reset could not undo it).
+  carry_targets: joints
+  # After the gripper opens, the hand goes this far (m) straight down before the retreat, which then
+  # doesn't lift; 0.0 = off (the retreat lifts by hold_press).
+  release_drop: 0.01
+  # The slow impedance lowering starts this far (m) above where the container's bottom meets the
+  # table; the carrying motion takes the hand straight down to there first. 0.0 = all of it slow.
+  lower_from: 0.06
   # Spot distance from the arm base axis (m) with the full descent (flatbot, table z 0.198). Arm
   # kinematics, measured without the chair volumes: re-measure. Outside it the plan decides.
   reach: [0.70, 1.10]

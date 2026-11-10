@@ -38,12 +38,14 @@ from rammp_arm import JOINTS, _unwrap_from
 from .plan import (
     Refused,
     VzContact,
+    arm_distance,
     commanded_z,
     contact_armed,
     contact_gate,
     descent_speed_scale,
     explain_failure,
     hold_point,
+    plan_descent,
     plan_retreat,
 )
 
@@ -178,20 +180,18 @@ def lower(arm, model, descent, cfg, rec, log):
     # "moving" scales with lower_speed (0.01 at the tuned 0.02), as the speed gate does
     contact = VzContact(stop=cfg["vz_stop"], moving=0.5 * cfg["lower_speed"])
     state = dict(t0=None, z=None, lag=lag)
+    arm_m = arm_distance(length, cfg["contact_ignore_m"], meet)
 
     def monitor():
         ee, new = rec.poll(arm)
         state["t0"] = state["t0"] or time.monotonic()  # the goal's clock, from its first poll
         u = (time.monotonic() - state["t0"]) / duration
-        armed = contact_armed(u, length, cfg["contact_ignore_m"])
+        armed = contact_armed(u, length, cfg["contact_ignore_m"], meet)
         if armed and state["lag"] is None:
             # No settle: the impedance lag is the hand against the command, here. Only a sag (hand
             # below) counts: a hand trailing above would put the hold deeper, pressing harder.
             state["lag"] = min(float(ee.position[2]) - commanded_z(line_z, u), 0.0)
-            log(
-                f"contact armed {cfg['contact_ignore_m'] * 100:.0f} cm down; "
-                f"impedance lag {state['lag'] * 100:+.1f} cm"
-            )
+            log(f"contact armed {arm_m * 100:.1f} cm down; impedance lag {state['lag'] * 100:+.1f} cm")
         hit = new and contact.update(float(ee.linear[2]), armed)
         if hit and contact_gate(u, length, duration, cfg["lower_speed"]):
             state["z"] = float(ee.position[2])
@@ -208,7 +208,7 @@ def lower(arm, model, descent, cfg, rec, log):
         f"lowering: {length * 100:.0f} cm in {duration:.0f} s (impedance), ~{cfg['lower_speed'] * 100:.0f} cm/s "
         f"where the table should be ({meet * 100:.0f}% down); "
         f"contact = vz back up to {cfg['vz_stop'] * 100:+.1f} cm/s, "
-        f"not in the first {cfg['contact_ignore_m'] * 100:.0f} cm"
+        f"not in the first {arm_m * 100:.1f} cm"
     )
     ok = arm.move_joints(line[1:], cart_lengths=lengths, speed_scale=scale, impedance=compliant(gains), monitor=monitor)
     if state["z"] is None:
@@ -261,15 +261,37 @@ def let_go(arm, rec, log):
         raise Refused(f"STOPPED, hand NOT backed out: the gripper only opened to {pos:.2f}. Open it, then `retreat`")
 
 
+def sink(arm, model, hold_q, drop, gains, rec, log):
+    """After letting go: the hand `drop` (m) straight down from hold_q, in impedance, so the open
+    fingers come off the lip downward before the retreat moves them sideways (a retreat that
+    started by lifting dragged the container, flatbot 2026-11-10). Returns the joints the retreat
+    starts from: hold_q itself if drop is 0 or the arm can't go down there (said in the log)."""
+    if drop <= 0:
+        return hold_q
+    z = float(model.fk(hold_q)[2, 3])
+    try:
+        _, qs = plan_descent(model, hold_q, z - drop)
+    except Refused as e:
+        log(f"no drop after letting go ({e}): the retreat starts from the hold")
+        return hold_q
+    (q,) = _unwrap_from(arm.raw_joints(), [qs[-1]])
+    rec.phase = "drop"
+    got = z - float(model.fk(q)[2, 3])
+    log(f"gripper open: the hand {got * 100:.1f} cm down (impedance) before backing out")
+    hold_goal(arm, q, gains)
+    wait_still(arm, 3.0, rec=rec)
+    return np.asarray(q, dtype=float)
+
+
 def back_out(arm, model, q_start, cfg, rec, log, release=0.0):
-    """Pull the hand straight back along plan.plan_retreat's line, in impedance, at most
-    `retreat_speed` (the line is timed minimum-jerk)."""
+    """Back the hand out along plan.plan_retreat's waypoints (straight back, or the swing), in
+    impedance, the fingertips at most `retreat_speed` (timed minimum-jerk; in a swing they travel
+    ~1.5x as far as the tool frame)."""
     line = plan_retreat(model, q_start, release=release, log=log)
-    lengths = [
-        float(np.linalg.norm(model.fk(b)[:3, 3] - model.fk(a)[:3, 3])) for a, b in zip(line[:-1], line[1:], strict=True)
-    ]
+    tips = [model.fk(q, "tip")[:3, 3] for q in line]
+    lengths = [float(np.linalg.norm(b - a)) for a, b in zip(tips[:-1], tips[1:], strict=True)]
     rec.phase = "retreat"
-    log(f"retreat: {sum(lengths) * 100:.0f} cm straight back (impedance, up to {cfg['retreat_speed'] * 100:.0f} cm/s)")
+    log(f"retreat: {sum(lengths) * 100:.0f} cm of hand travel (impedance, up to {cfg['retreat_speed'] * 100:.0f} cm/s)")
 
     def record_only():
         rec.poll(arm)

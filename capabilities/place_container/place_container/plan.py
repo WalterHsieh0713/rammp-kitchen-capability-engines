@@ -40,12 +40,26 @@ RETREAT = 2.5 * LIP_WIDTH  # m, straight back after letting go: the fingers slid
 RETREAT_MIN = 1.5 * LIP_WIDTH  # m, a shorter line is still taken if it gets this far (past the lip)
 RETREAT_STEP = 0.004  # m, between the retreat's joint waypoints
 RETREAT_RELEASE = 0.25  # the first quarter of the retreat also lifts the setpoint by the hold's press
+# Where the straight line back runs out of reach (the elbow at its limit, close spots): turn the hand
+# instead, seen from above, about the vertical through the flange. The fingertips, ~18 cm ahead of
+# it, swing out along an arc, still straddling the lip (the turn keeps every height), until they
+# are past its outer edge; the wrist barely moves, so the elbow needs no room.
+SWING_DEG = 60.0  # deg, the full turn, left or right
+SWING_CLEAR = 0.01  # m, the fingertips end at least this far outside the lip's outer edge
+# m: the swing starts after as much of the straight line back as fits, so the fingertips first leave the
+# container wall they are pushed against -- a swing from the wall drags the container round with it by
+# friction (flatbot, 2026-11-10). At least this much of it is wanted; less, and the swing still runs.
+SWING_BACKOFF = 0.01
 MAX_ADJUST_DEG = 15.0  # the squaring turn may only correct this much (a bigger one tips the container)
 MAX_BOWL_TILT_DEG = 10.0  # container tilt allowed anywhere along a joint move
 MAX_LOWER_TILT_DEG = 1.0  # ... and on the straight way down
 # --- checks ---
 IK_TOL = 0.005  # m
 IK_ROT_TOL_DEG = 1.0
+# rad: IK answers stay this far inside each joint limit -- the driver's joint_limit_margin_rad, which
+# refuses a goal any closer (GOAL_IN_LIMIT_MARGIN). Without it the solver pins a joint ON its limit
+# and a retreat that ran out of elbow room looked complete (flatbot, 2026-11-10: J4 at 2.570).
+LIMIT_MARGIN = 0.10
 MAX_STEP_JUMP_DEG = 120.0  # one joint move
 UP = np.array([0.0, 0.0, 1.0])
 
@@ -162,8 +176,8 @@ class Model:
             rot = (Rotation.from_matrix(T[:3, :3]) * target.inv()).as_rotvec()
             return np.concatenate([T[:3, 3] - pos, rot_weight * rot, stay * wrap(x - seed)])
 
-        lo = np.array([a if a < b else -2 * np.pi for a, b in self.limits])
-        hi = np.array([b if a < b else 2 * np.pi for a, b in self.limits])
+        lo = np.array([a + LIMIT_MARGIN if a < b else -2 * np.pi for a, b in self.limits])
+        hi = np.array([b - LIMIT_MARGIN if a < b else 2 * np.pi for a, b in self.limits])
         rng = np.random.default_rng(0)
         best = None
         for k in range(restarts + 1):
@@ -323,7 +337,15 @@ def find_posture(model, pos, quat, q_from, floor_z, table_z, seeds=40, tries=5, 
 
 
 def plan_place(
-    model, q_now, spot, table_z, max_adjust=MAX_ADJUST_DEG, allow_reconfigure=False, reach=(0.70, 1.10), log=None
+    model,
+    q_now,
+    spot,
+    table_z,
+    max_adjust=MAX_ADJUST_DEG,
+    allow_reconfigure=False,
+    reach=(0.70, 1.10),
+    lower_from=0.0,
+    log=None,
 ):
     """The whole place from joints q_now: (moves [(name, q)], descent (zs, qs), info).
 
@@ -393,6 +415,11 @@ def plan_place(
     waypoints.append(
         dict(name=transit[-1][0], pos=above, quat=quat, hold="level", q=transit[-1][1], joints=reconfigure)
     )
+    down, descent = split_approach(descent, table_z, lower_from)
+    moves += down
+    if down:
+        T = model.fk(down[-1][1])
+        waypoints.append(dict(name="approach", pos=T[:3, 3], quat=quat, hold="level", q=down[-1][1]))
     info = dict(
         adjust_deg=adjust_deg,
         approach=approach,
@@ -403,6 +430,26 @@ def plan_place(
         waypoints=waypoints,
     )
     return moves, descent, info
+
+
+APPROACH_EVERY = 0.04  # m, a joint waypoint this often on the approach, so it stays near the straight line
+
+
+def split_approach(descent, table_z, lower_from):
+    """The line down (zs, qs) split where the tool is `lower_from` above where the container's bottom
+    meets the table: the part above becomes "approach" joint moves for the fast carrying motion
+    (position mode, cuRobo, a waypoint every APPROACH_EVERY so it stays near the line), the rest is
+    the slow impedance line, which then has only those last cm to cover before the touch. lower_from
+    0 (or a line that starts lower already): no approach, the whole line slow as before.
+    Returns (approach [(name, q)], descent (zs, qs))."""
+    zs, qs = descent
+    end = table_z + BOWL_DEPTH + lower_from
+    if lower_from <= 0 or zs[0] - end < 0.01:
+        return [], descent
+    k = int(np.searchsorted(-np.asarray(zs), -end, side="right")) - 1  # the last point at or above `end`
+    every = max(1, int(round(APPROACH_EVERY / PATH_STEP)))
+    picks = list(range(every, k, every)) + [k]
+    return [("approach'" if i != k else "approach", qs[i]) for i in picks], (zs[k:], qs[k:])
 
 
 def blend_radii(waypoints, table_z, near, far):
@@ -419,7 +466,7 @@ def plan_retreat(model, q_start, release=0.0, step=RETREAT_STEP, log=None):
     tool pose (back = opposite the hand's heading), orientation kept. release: also lift that much
     over the first RETREAT_RELEASE of it (the press lets go gently). The first entry is q_start. If
     the line runs out of reach after RETREAT_MIN it ends there (flatbot at 0.8 m, 2026-10-26: 6-7 cm
-    of the 8)."""
+    of the 8). If it runs out before, the hand swings out instead (plan_swing)."""
     T = model.fk(q_start)
     quat = Rotation.from_matrix(T[:3, :3]).as_quat()
     back = -np.array([T[0, 2], T[1, 2], 0.0])
@@ -438,13 +485,66 @@ def plan_retreat(model, q_start, release=0.0, step=RETREAT_STEP, log=None):
                 if log is not None:
                     log(f"retreat: only {done * 100:.1f} cm straight back fits from here (of {RETREAT * 100:.0f})")
                 break
-            raise Refused(f"retreat: can't go straight back from here ({f * RETREAT * 100:.0f} cm in)")
+            straight = f"only {done * 100:.1f} cm straight back fits (needs {RETREAT_MIN * 100:.1f})"
+            # swing from the end of the straight part (fingertips off the wall), the lift already done
+            lifted = min(1.0, (k - 1) / n / RETREAT_RELEASE) * release
+            swing = plan_swing(model, qs[-1], release - lifted, step, q_wall=q_start)
+            if isinstance(swing, str):
+                raise Refused(f"retreat: can't back out from here: {straight}; {swing}")
+            if log is not None:
+                off = "" if done >= SWING_BACKOFF else " (WARNING: the fingertips may still touch the wall)"
+                log(f"retreat: {straight}; it backs {done * 100:.1f} cm, then the hand swings out: {swing[1]}{off}")
+            return qs + swing[0][1:]
         qs.append(q)
         seed = q
     return qs
 
 
-def reset_moves(model, q_now, q_start, empty=False):
+def plan_swing(model, q_start, release=0.0, step=RETREAT_STEP, q_wall=None):
+    """The retreat as a turn of the hand about the vertical through the flange, SWING_DEG left or
+    right (seen from above), joint waypoints every ~`step` of fingertip travel; release lifts as
+    plan_retreat does. Each side runs until it is done or out of reach; one that ends with the
+    fingertips at least SWING_CLEAR outside the lip's outer edge counts, the longer turn wins.
+    q_wall: the joints with the fingertips at the container wall (default q_start), which locate the
+    container. Returns (waypoints, a note for the log), or why neither side works (a str)."""
+    T, T_fl, T_tip = model.fk(q_start), model.fk(q_start, "flange"), model.fk(q_start, "tip")
+    q_wall = q_start if q_wall is None else q_wall
+    W = model.fk(q_wall)
+    heading = np.array([W[0, 2], W[1, 2], 0.0])
+    heading /= np.linalg.norm(heading)  # plan_retreat refused a steep hand already
+    centre = model.fk(q_wall, "tip")[:3, 3] + BOWL_RADIUS * heading  # the container's axis: tips at its wall
+    clear = BOWL_RADIUS + LIP_WIDTH + SWING_CLEAR
+    pivot = T_fl[:3, 3]
+    lever = np.hypot(*(T_tip[:2, 3] - pivot[:2]))  # flange to fingertips, seen from above
+    n = max(1, int(np.ceil(np.radians(SWING_DEG) * lever / step)))
+    rot0 = Rotation.from_matrix(T[:3, :3])
+    best, reasons = None, []
+    for side, sign in (("left", 1.0), ("right", -1.0)):
+        qs, seed, out = [np.asarray(q_start, dtype=float)], np.asarray(q_start, dtype=float), False
+        for k in range(1, n + 1):
+            f = k / n
+            turn = Rotation.from_euler("z", sign * f * SWING_DEG, degrees=True)
+            pos = pivot + turn.apply(T[:3, 3] - pivot) + min(1.0, f / RETREAT_RELEASE) * release * UP
+            q = model.ik(pos, (turn * rot0).as_quat(), seed, restarts=0, stay=0.01)
+            if q is None or np.max(np.abs(wrap_deg(q - seed))) > 3.0 * step / PATH_STEP:
+                break
+            qs.append(q)
+            seed = q
+            out = np.hypot(*(model.fk(q, "tip")[:2, 3] - centre[:2])) >= clear
+        deg = (len(qs) - 1) / n * SWING_DEG
+        if not out:
+            reasons.append(f"a swing {side} gets only {deg:.0f} deg, the fingertips still over the lip")
+        elif best is None or deg > best[1]:
+            best = (qs, deg, side)
+        if out and len(qs) - 1 == n:
+            break  # the full turn, clear of the lip: the other side can't do better (and costs ~50 IK solves)
+    if best is None:
+        return "; ".join(reasons)
+    qs, deg, side = best
+    return qs, f"{deg:.0f} deg {side}, fingertips past the lip"
+
+
+def reset_moves(model, q_now, q_start, empty=False, big_turn=False):
     """Back to a saved start: straight UP to the start's height first (the open fingers rise clear
     of the container instead of sweeping across it), then one joint move to the start's joints.
     empty: nothing in the hand, so the joint move may turn the hand any way (no tilt check)."""
@@ -457,8 +557,11 @@ def reset_moves(model, q_now, q_start, empty=False):
         q = moves[-1][1]
     problems = check_joint_move(model, q, q_start, None, tilt_check=not empty)
     jump = float(np.max(np.abs(wrap_deg(np.asarray(q_start) - q))))
-    if problems or jump > MAX_STEP_JUMP_DEG:
-        raise Refused("back to the start: " + ("; ".join(problems) or f"a joint moves {jump:.0f} deg"))
+    if problems or (jump > MAX_STEP_JUMP_DEG and not (empty and big_turn)):
+        raise Refused(
+            "back to the start: "
+            + ("; ".join(problems) or f"a joint moves {jump:.0f} deg (empty hand: big_turn allows it)")
+        )
     return moves + [("start", np.asarray(q_start, dtype=float))]
 
 
@@ -565,11 +668,24 @@ def descent_speed_scale(meet, lower_speed, cart_speed):
     return peak / cart_speed
 
 
-def contact_armed(u, length, ignore_m):
+CONTACT_ARM_BEFORE = 0.01  # m, contact is armed at least this far above where the table should be
+
+
+def contact_armed(u, length, ignore_m, meet=None):
     """Whether contact may be called yet at time fraction u of a descent `length` long: the command
-    has gone at least `ignore_m` down (at most half the line). Without a settle, the arm goes
-    compliant as the descent starts and sags a little; that is over within the first few cm."""
-    return minjerk_distance(u) * length >= min(ignore_m, 0.5 * length)
+    has gone at least `ignore_m` down (at most half the line, and with `meet` -- where the table
+    should be, 0..1 of the line -- at least CONTACT_ARM_BEFORE above it, so a short line that starts
+    just above the table still feels it). Without a settle, the arm goes compliant as the descent
+    starts and sags a little; that is over within the first few cm."""
+    return minjerk_distance(u) * length >= arm_distance(length, ignore_m, meet)
+
+
+def arm_distance(length, ignore_m, meet=None):
+    """How far down (m) the descent's command goes before contact is armed (contact_armed)."""
+    d = min(ignore_m, 0.5 * length)
+    if meet is not None:
+        d = min(d, max(meet * length - CONTACT_ARM_BEFORE, 0.0))
+    return d
 
 
 def commanded_z(line_z, u):

@@ -7,11 +7,15 @@ Actions:
   mark     the closed fingertips touching the target -> saved as the spot (its z = the table). No motion.
   place    the container, gripped by its lip, to the spot ({x, y, table_z}, or the marked one):
              1. adjust: square the hand in place to the nearest hold (level, pointing `pitch_deg` down);
-             2. lift to SAFE_HEIGHT above the table, if lower; 3. transit to above the spot (HOLD_LEVEL)
-             -- 1-3 are ONE go_to_ee_poses motion (cuRobo, around the chair's collision volumes,
-             blended at the waypoints; `blend` false: separate moves as before);
-             4. the straight line down in the driver's IMPEDANCE mode
-             until contact, then hold `hold_press` below it (lower.py); 5. open; 6. straight back.
+             2. lift to SAFE_HEIGHT above the table, if lower; 3. transit to above the spot; 3b. the
+             approach straight down to `lower_from` above where the container meets the table
+             -- 1-3b are ONE go_to_joint_configs motion through our planned joints (cuRobo, around the
+             chair's collision volumes, blended at the waypoints; `carry_targets` pose: go_to_ee_poses;
+             `blend` false: separate moves as before);
+             4. the rest of the straight line down in the driver's IMPEDANCE mode
+             until contact, then hold `hold_press` below it (lower.py); 5. open, drop `release_drop`;
+             6. back out: straight back, or a short way back and then a turn of the hand that swings
+             the fingertips off the lip (plan.plan_swing).
            The arm is left in impedance, held where the retreat ended.
   retreat  only step 6 (after a place stopped with the gripper open).
   reset    back to the start position (where the last place started, or `save`d): straight up,
@@ -45,6 +49,9 @@ from . import lower, plan
 # geometry (flange_to_tip, pitch, reach as kinematics) still holds, but a spot or start position saved
 # before then was saved relative to a chair and table that are now 0.2032 m nearer in x.
 ARM_MOVED = 1794074180.0  # 2026-11-07T17:56:20Z
+# deg: after the carry, the planned line down is used if the arm is within this of its first joints
+# (lower() starts the line from the measured joints, so this much is a smooth start, not a jump)
+REPLAN_DEG = 1.0
 
 # ROS parameter -> default: the flatbot's values (2026-10-26, unless noted).
 PARAMS = {
@@ -57,12 +64,16 @@ PARAMS = {
     "vz_stop": -0.01,
     # the hold after contact, this far (m) below the contact point, while the gripper opens
     "hold_press": 0.003,
+    # after the gripper opens, the hand goes this far (m) straight down before the retreat, which then
+    # doesn't lift: the open fingers leave the lip downward (lifting first dragged the container,
+    # 2026-11-10). 0.0 = off (the retreat lifts by hold_press as before)
+    "release_drop": 0.01,
     # held in impedance at the start this long (s) before going down; must end still. 0 = no pause:
     # the arm goes compliant as the descent starts (contact_ignore_m covers its sag)
-    "settle_s": 3.0,
+    "settle_s": 0.0,  # flatbot 2026-11-10: contact_ignore_m covers the sag; 3.0 added ~4 s
     # contact is ignored until the descent's command has gone this far down (m): the sag when the arm
     # goes compliant must not read as moving down and being stopped
-    "contact_ignore_m": 0.03,
+    "contact_ignore_m": 0.08,  # 0.03 armed mid catch-up: a false contact (flatbot 2026-11-10)
     # contact more than this (m) above where the bottom meets the table = not the table
     "early_stop": 0.03,
     # joint impedance for the settle, lowering, hold, retreat and reset, one set so the stiffness never
@@ -72,11 +83,15 @@ PARAMS = {
     "impedance_kq": list(rammp_arm.IMPEDANCE["kq"]),
     "impedance_zeta": rammp_arm.IMPEDANCE["zeta"],
     "impedance_torque_limit": list(rammp_arm.IMPEDANCE["torque_limit"]),
+    # the slow impedance lowering starts this far (m) above where the container's bottom meets the table;
+    # the carrying motion takes the hand straight down to there first (position mode, fast). 0.0 = the
+    # whole way down from the carrying height slow, as before (~14 s at the flatbot's spot, 2026-11-10)
+    "lower_from": 0.06,
     # speeds. The lowering stays at the 2 cm/s its contact test was tuned at; the rest is 2x RAMMP-table's
     # (2026-10-29): the hand's speed where the table should be (m/s)
     "lower_speed": 0.02,
     # speed_scale of the carrying moves (go_to_ee_pose; was 0.2)
-    "go_to_speed_scale": 0.4,
+    "go_to_speed_scale": 0.6,  # flatbot 2026-11-10 (was 0.4)
     # speed_scale of the squaring turn with blend false (move_joints; was 0.5)
     "adjust_speed_scale": 1.0,
     # adjust -> lift -> transit as ONE go_to_ee_poses motion (cuRobo, blended at the waypoints, all at
@@ -86,8 +101,13 @@ PARAMS = {
     # "joints" = a go_to_joint_config to our checked joints first (if cuRobo swings the hand for the
     # pose, as it did 2026-10-08), then lift -> transit blended
     "adjust_mode": "pose",
+    # with blend: "joints" = the carrying motion goes through OUR planned joints (go_to_joint_configs,
+    # blended; plan_segment keeps each leg level, above the table and under 120 deg a joint), so the arm
+    # keeps the start's posture; "pose" = hand poses, cuRobo picks the joints -- on 2026-11-10 it chose
+    # another posture at the spot (J1 +101, J3 -147 deg from the start) and reset could not undo it
+    "carry_targets": "joints",
     # the retreat's peak speed (m/s; was 0.03)
-    "retreat_speed": 0.06,
+    "retreat_speed": 0.10,  # flatbot 2026-11-10 (was 0.06)
     # speed_scale of reset's joint moves with reset_mode legacy (move_joints; was ~0.5)
     "reset_speed_scale": 1.0,
     # reset: "curobo" = one go_to_joint_configs motion (up, then the start), planned around the chair's
@@ -139,6 +159,9 @@ RESET = {
         "save": {"type": "boolean", "default": False},
         # nothing in the (closed) gripper: skip the container-tilt check on the way back
         "empty": {"type": "boolean", "default": False},
+        # empty hand only: allow a joint to turn more than 120 deg on the way back (one big cuRobo joint
+        # move, around the chair's volumes) -- to recover from a different arm posture
+        "big_turn": {"type": "boolean", "default": False},
     },
 }
 
@@ -230,6 +253,7 @@ class Capability(CapabilityEngine):
             max_adjust=self.cfg["max_adjust_deg"],
             allow_reconfigure=self.cfg["allow_reconfigure"],
             reach=(lo, hi),
+            lower_from=self.cfg["lower_from"],
             log=log,
         )
         if info["reconfigure"]:
@@ -248,13 +272,18 @@ class Capability(CapabilityEngine):
         self._check_contact_zone(model, descent, table_z, log)
         if not execute:
             if self.cfg["blend"] and self.cfg["curobo_check"]:
-                self._check_carry(info["waypoints"], log)
+                if self.cfg["carry_targets"] == "joints":
+                    self._check_carry_joints(moves, log)
+                else:
+                    self._check_carry(info["waypoints"], log)
             log("DRY RUN -- all checks passed, nothing commanded")
             return {"executed": False, "plan": steps}
 
         self._ready()
         self._save("start.json", dict(q=[float(v) for v in q_now], time=time.time()))
-        if self.cfg["blend"]:
+        if self.cfg["blend"] and self.cfg["carry_targets"] == "joints":
+            self._carry_joints(model, moves, table_z, ctx, log)
+        elif self.cfg["blend"]:
             self._carry(info["waypoints"], table_z, ctx, log)
         else:
             self._carry_separately(model, moves, ctx, log)
@@ -266,9 +295,14 @@ class Capability(CapabilityEngine):
                 "(max 1.0); "
                 "nothing let go. Next: reset, then run again with adjust_mode:=joints or blend:=false"
             )
-        # The line down again, from where the arm IS: go_to_ee_pose lets cuRobo choose the joints, and a
-        # line planned from other joints would start with a jump between the two postures.
-        descent = plan.plan_descent(model, q_top, info["floor_z"], log=log)
+        # The arm ended on the planned joints (a joint-target carry does): the planned line down starts
+        # here, use it -- planning it again (~60 IK solves) held the arm still above the spot. Otherwise
+        # (pose targets: cuRobo chose the joints) the line again, from where the arm IS, or a line planned
+        # from other joints would start with a jump between the two postures.
+        off_deg = float(np.max(np.abs(plan.wrap_deg(q_top - np.asarray(descent[1][0])))))
+        if off_deg > REPLAN_DEG:
+            log(f"the arm ended {off_deg:.1f} deg from the planned joints: the line down planned again from there")
+            descent = plan.plan_descent(model, q_top, info["floor_z"], log=log)
         if not plan.reaches(descent, table_z):
             raise plan.Refused(
                 f"STOPPED above the spot: {plan.reach_refusal(descent, table_z, spot)} in the posture cuRobo "
@@ -282,8 +316,12 @@ class Capability(CapabilityEngine):
             ctx.progress("open", 0.0)
             lower.let_go(self.arm, rec, log)
             time.sleep(0.5)
+            drop = self.cfg["release_drop"]
+            hold_q = lower.sink(self.arm, model, hold_q, drop, self.cfg["gains"], rec, log)
             ctx.progress("retreat", 0.0)
-            lower.back_out(self.arm, model, hold_q, cfg, rec, log, release=self.cfg["hold_press"])
+            # with the drop, the retreat stays down (no lift while the fingers may still be by the lip)
+            release = 0.0 if drop > 0 else self.cfg["hold_press"]
+            lower.back_out(self.arm, model, hold_q, cfg, rec, log, release=release)
         finally:
             path = rec.write(self.state_dir / "descents")
             if path is not None:
@@ -318,7 +356,12 @@ class Capability(CapabilityEngine):
         start = self._load("start.json", "no start position saved: run reset with save, or a place first")
         # Nothing in the hand (the gripper is open, or the goal says so): the way back may turn the hand.
         empty = float(self.arm.gripper_state().position) <= lower.OPEN_STALLED or bool(params.get("empty", False))
-        moves = plan.reset_moves(model, self._joints(), np.asarray(start["q"], dtype=float), empty=empty)
+        big_turn = bool(params.get("big_turn", False))
+        if big_turn and not empty:
+            raise plan.Refused("big_turn is only for an empty hand: open the gripper or set empty, then reset")
+        moves = plan.reset_moves(
+            model, self._joints(), np.asarray(start["q"], dtype=float), empty=empty, big_turn=big_turn
+        )
         steps = [dict(name=n, tool=np.round(model.fk(q)[:3, 3], 3).tolist()) for n, q in moves]
         if not execute:
             return {"executed": False, "plan": steps}
@@ -402,6 +445,42 @@ class Capability(CapabilityEngine):
                     raise plan.Refused(
                         "STOPPED: " + plan.explain_failure(self.arm.last_error, [w["name"]], {w["name"]: w["pos"]})
                     )
+
+    def _carry_joints(self, model, moves, table_z, ctx, log):
+        """adjust -> lift -> transit as ONE go_to_joint_configs motion through plan_place's joints
+        (every leg checked level and above the table, on the start's posture): cuRobo plans around the
+        chair's volumes and blends, but can't pick another posture."""
+        speed = self.cfg["go_to_speed_scale"]
+        names = [n for n, _ in moves]
+        qs = _unwrap_from(self.arm.raw_joints(), [q for _, q in moves])
+        where = {n: model.fk(q)[:3, 3] for n, q in moves}
+        radii = plan.blend_radii(
+            [dict(pos=where[n]) for n in names], table_z, self.cfg["blend_radius_near"], self.cfg["blend_radius_far"]
+        )
+        targets = [JointTarget(q, blend_radius=r, speed_scale=speed) for q, r in zip(qs, radii, strict=True)]
+        label = " -> ".join(names)
+        ctx.progress("carry", 0.0)
+        log(f"-> {label} (go_to_joint_configs, one motion, speed x{speed}, blend {radii} m)")
+        if not self.arm.go_to_joint_configs(targets, label):
+            raise plan.Refused("STOPPED: " + plan.explain_failure(self.arm.last_error, names, where))
+
+    def _check_carry_joints(self, moves, log):
+        """Dry run: cuRobo plans each joint leg of the carrying motion (nothing moves), from the
+        measured joints and then each planned one."""
+        names = [n for n, _ in moves]
+        start = self.arm.raw_joints()
+        for k, q in enumerate(_unwrap_from(start, [q for _, q in moves])):
+            try:
+                res = self.arm.plan_to_joints(q, start)
+            except ArmError as e:
+                raise plan.Refused(
+                    f"cuRobo check of {names[k]}: " + plan.explain_failure(f"{type(e).__name__}: {e}", [names[k]])
+                ) from e
+            if not res.success:
+                why = plan.explain_failure(f"leg {k + 1}/{len(names)}: {res.message}", names)
+                raise plan.Refused(f"DRY RUN, cuRobo check: {why}")
+            log(f"cuRobo check: {names[k]} plans in joint space ({res.planning_time:.2f} s)")
+            start = q
 
     def _carry_separately(self, model, moves, ctx, log):
         """blend false: each move on its own, as on 2026-10-29 (adjust on move_joints, the rest

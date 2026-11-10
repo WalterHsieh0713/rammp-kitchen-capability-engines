@@ -8,8 +8,11 @@
 
 Puts the food container, already gripped by its lip, down at a spot on the table and lets go.
 It squares the hand (level, pointing 5° down), carries the container over to above the spot,
-lowers it along a straight line in the driver's joint impedance mode until the table stops it,
-holds a light press while the gripper opens, then backs the hand straight out. The spot is
+takes it quickly straight down to just above the table (`lower_from`), lowers the last few cm along
+a straight line in the driver's joint impedance mode until the table stops it, holds a light press
+while the gripper opens, drops the open hand 1 cm (`release_drop`) and backs it out: straight
+back, or, where the elbow runs out of room close to the arm, a short way back and then a 60° turn
+of the hand about the wrist (seen from above) that swings the fingertips off the lip. The spot is
 given in `arm_mount` (x, y, table height), or marked by touching it with the fingertips (`mark`).
 Finding a free spot from the cameras is not part of it (free-space segmentation belongs in
 rammp-perception, rammp-deployments#96). Without it, the container stays in the hand after the
@@ -47,10 +50,12 @@ Every action is a dry run (plan and check, nothing moves) unless the node runs w
 | `place`   | `execute`; `x`, `y`, `table_z` (m, arm_mount; all or none = the marked spot); `allow_empty_gripper` | `{"executed", "plan"}` or `{"executed", "recording"}` |
 | `mark`    | —                                                                                                   | `{"spot": [x, y], "table_z"}`                         |
 | `retreat` | `execute`                                                                                           | `{"executed", "to"}`                                  |
-| `reset`   | `execute`, `save` (save the current joints as the start), `empty` (no tilt check)                   | `{"executed", "plan"}` or `{"saved"}`                 |
+| `reset`   | `execute`, `save` (save the current joints as the start), `empty` (no tilt check), `big_turn`       | `{"executed", "plan"}` or `{"saved"}`                 |
 
-Progress phases of `place`: `carry` (adjust, lift and transit in one motion; with `blend` false or
-`adjust_mode` joints, `adjust`, `lift`, `transit` on their own), `lower`, `open`, `retreat`. A failed
+Progress phases of `place`: `carry` (adjust, lift, transit and the approach down in one blended motion
+through the planned joints; with `blend` false or `adjust_mode` joints, `adjust`, `lift`, `transit` on
+their own), `lower`, `open`, `retreat`. `reset` with `big_turn` (empty hand only) lets a joint turn
+more than 120° on the way back, to recover from a different arm posture. A failed
 check ends the action with `refused` (recoverable) and the reason: what happened, where (m in
 `arm_mount`), what to do next, then the driver's or cuRobo's own words. An error of the arm driver
 itself ends it with the error's name (`StateTimeout`, `ControlTaken`, ...), also recoverable; after contact the arm is left holding in
@@ -74,7 +79,8 @@ the orchestrator is up.
 
 ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
-passes them as a params file. The defaults are the flatbot's (2026-10-26).
+passes them as a params file. The defaults are the flatbot's (2026-10-26; speeds, settle and
+contact arming 2026-11-10).
 
 | Name                     | Default                                      | Meaning                                                                                                                                                                              |
 | ------------------------ | -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -85,18 +91,21 @@ passes them as a params file. The defaults are the flatbot's (2026-10-26).
 | `pitch_deg`              | `5.0`                                        | The hand points this many deg down while placing                                                                                                                                     |
 | `vz_stop`                | `-0.01`                                      | Contact: the hand's z velocity back up to this (m/s, + up)                                                                                                                           |
 | `hold_press`             | `0.003`                                      | The hold after contact, this far below the contact point (m)                                                                                                                         |
-| `settle_s`               | `3.0`                                        | Held in impedance at the start this long before going down (s); 0 = no pause                                                                                                         |
-| `contact_ignore_m`       | `0.03`                                       | Contact is ignored for the descent's first this-many m (the sag when the arm goes compliant)                                                                                         |
+| `release_drop`           | `0.01`                                       | After the gripper opens, the hand goes this far straight down before backing out, which then doesn't lift (m); 0 = off                                                               |
+| `settle_s`               | `0.0`                                        | Held in impedance at the start this long before going down (s); 0 = no pause                                                                                                         |
+| `contact_ignore_m`       | `0.08`                                       | Contact is ignored for the descent's first this-many m (the arm's sag and catch-up); at most up to 1 cm above where the table should be                                              |
 | `early_stop`             | `0.03`                                       | Contact more than this above where the bottom meets the table: refused (m)                                                                                                           |
 | `impedance_kq`           | `[80.0, 80.0, 80.0, 80.0, 30.0, 30.0, 30.0]` | Joint stiffness of every impedance move, J1..J7                                                                                                                                      |
 | `impedance_zeta`         | `0.5`                                        | Damping ratio of every impedance move                                                                                                                                                |
 | `impedance_torque_limit` | `[39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0]`    | Torque limit of every impedance move (Nm), J1..J7                                                                                                                                    |
+| `lower_from`             | `0.06`                                       | The slow impedance lowering starts this far above where the container's bottom meets the table; the carry goes straight down to there (m)                                            |
 | `lower_speed`            | `0.02`                                       | The hand's speed where the table should be (m/s): the contact test's speed. Up to `arm.cart_speed` / 1.5; the contact thresholds scale with it, `vz_stop` must stay above -0.75 x it |
-| `go_to_speed_scale`      | `0.4`                                        | speed_scale of the carrying moves (2x RAMMP-table's)                                                                                                                                 |
+| `go_to_speed_scale`      | `0.6`                                        | speed_scale of the carrying moves and the reset (3x RAMMP-table's)                                                                                                                   |
 | `blend`                  | `true`                                       | adjust -> lift -> transit as one blended cuRobo motion; `false` = separate moves as on 2026-10-29                                                                                    |
 | `adjust_mode`            | `"pose"`                                     | With `blend`: `pose` = the squaring turn is the motion's first target; `joints` = a joint move to our checked joints first                                                           |
+| `carry_targets`          | `"joints"`                                   | With `blend`: `joints` = the carrying motion through our planned joints (keeps the start's posture); `pose` = hand poses, cuRobo picks the joints                                    |
 | `adjust_speed_scale`     | `1.0`                                        | speed_scale of the squaring turn (2x)                                                                                                                                                |
-| `retreat_speed`          | `0.06`                                       | The retreat's peak speed (m/s; 2x)                                                                                                                                                   |
+| `retreat_speed`          | `0.10`                                       | The retreat's peak fingertip speed (m/s)                                                                                                                                             |
 | `reset_speed_scale`      | `1.0`                                        | speed_scale of reset's joint moves with `reset_mode` legacy (2x)                                                                                                                     |
 | `reset_mode`             | `"curobo"`                                   | `curobo`: reset is one cuRobo motion around the chair; `legacy`: the old impedance joint moves                                                                                       |
 | `blend_radius_near`      | `0.03`                                       | blend_radius near the table or the container, which cuRobo doesn't know (m)                                                                                                          |
