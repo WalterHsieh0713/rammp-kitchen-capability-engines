@@ -135,6 +135,22 @@ class _Run:
         self.ui_lock = threading.Lock()
         self.ui_goal_handle = None
         self.ui_pending_event: dict | None = None
+        # The run's full desired panel state so far, merged across every
+        # update_user_panel() call (only the keys actually supplied at least
+        # once are present). Used -- not just the latest call's own partial
+        # payload -- whenever a *new* RequestUserInput goal is opened (first
+        # open, or a reopen after a refusal/forced-abort), so a replacement
+        # goal always carries forward previously-set panel/objects/selection
+        # content instead of silently dropping it.
+        self.ui_desired_state: dict = {}
+        # True from the moment a RequestUserInput goal's send is dispatched
+        # until its acceptance/rejection is known (_ui_on_goal_response). A
+        # second update_user_panel() call arriving in that window must not
+        # send a second goal (the bridge only allows one open goal per token
+        # and would reject it, silently losing that call's content) -- it
+        # merges into ui_desired_state above instead, and is pushed once the
+        # in-flight goal is accepted.
+        self.ui_opening = False
         # Set by _ui_close() once execute() has ended. A RequestUserInput goal
         # accepted after that point (e.g. its send was in flight when the run
         # ended) must be cancelled immediately on arrival instead of being
@@ -219,6 +235,13 @@ class Context:
         """Whether the action has been cancelled. Never blocks, even while paused: self.arm
         polls it while a motion runs."""
         return self._run.cancelled.is_set() or self._goal.is_cancel_requested
+
+    def paused(self) -> bool:
+        """Whether the action is currently paused. Never blocks, unlike checkpoint():
+        a capability that must keep doing something while paused (e.g. still polling
+        poll_ui_event() for a Stop tap) should check this instead of calling
+        checkpoint(), which blocks for the whole pause."""
+        return self._run.paused.is_set()
 
     def request_intent(self, intent_type: str, params: dict | None = None) -> Result:
         """Ask the orchestrator to delegate an intent (e.g. MOVE_BASE) and wait (Cancelled
@@ -543,7 +566,27 @@ class CapabilityEngine(Node):
             request_payload["selected_instance_id"] = selected_instance_id
 
         with run.ui_lock:
+            # Merge into the run's full desired state regardless of which
+            # branch below actually fires -- a later reopen (after a refusal,
+            # or because a goal-open was already in flight) must still carry
+            # forward this call's content even though it isn't sent right now.
+            if panel_json is not None:
+                run.ui_desired_state["panel_json"] = request_payload["panel_json"]
+            if objects is not None:
+                run.ui_desired_state["objects"] = objects
+            if selected_instance_id is not None:
+                run.ui_desired_state["selected_instance_id"] = selected_instance_id
+            has_content = "panel_json" in run.ui_desired_state or "objects" in run.ui_desired_state
             goal_handle = run.ui_goal_handle
+            opening = run.ui_opening
+            # Claim the open ourselves, still under the lock, if we're about
+            # to start one -- so a second call racing in right behind this
+            # one (before _ui_open_goal() itself runs) sees ui_opening
+            # already set and coalesces instead of also opening a goal.
+            will_open = goal_handle is None and not opening and has_content
+            if will_open:
+                run.ui_opening = True
+
         if goal_handle is not None:
             if not self._ui_update_client.service_is_ready():
                 self.get_logger().warning(
@@ -556,25 +599,36 @@ class CapabilityEngine(Node):
                 )
             )
             future.add_done_callback(
-                lambda f: self._ui_on_update_response(run, token, request_payload, f)
+                lambda f: self._ui_on_update_response(run, token, goal_handle, f)
             )
             return True
 
-        if "panel_json" not in request_payload and "objects" not in request_payload:
+        if opening:
+            # A goal-open is already in flight for this run (sent by an
+            # earlier call, not yet accepted/rejected): don't send a second
+            # one -- the bridge only allows one open goal per token and would
+            # reject it, silently losing this call's content. It's already
+            # merged into ui_desired_state above and will reach the bridge
+            # once the in-flight open is accepted (see _ui_on_goal_response).
+            return has_content
+
+        if not has_content:
             self.get_logger().warning(
                 "update_user_panel: need panel_json or objects to open a new goal"
             )
             return False
-        return self._ui_open_goal(run, request_payload, token)
+        return self._ui_open_goal(run, token)
 
-    def _ui_on_update_response(
-        self, run: "_Run", token: bytes, request_payload: dict, future
-    ) -> None:
+    def _ui_on_update_response(self, run: "_Run", token: bytes, goal_handle, future) -> None:
         """Done-callback for the UpdateUserInputPanel call `_ui_update_panel`
         fires without waiting for. Reopens a fresh goal in the background if
         the update was refused -- most likely the previous goal just ended (a
         button press, or the bridge force-aborted it) since we last checked --
-        same as if this were the first call."""
+        same as if this were the first call. Guarded against `goal_handle`
+        (the goal this particular update was sent against) having already
+        been replaced by a newer one: a delayed refusal callback must not
+        clear a newer goal's handle or trigger a redundant reopen on top of
+        it."""
         try:
             response = future.result()
         except Exception as error:
@@ -584,15 +638,26 @@ class CapabilityEngine(Node):
             return
         if response.accepted:
             return
-        self.get_logger().info(f"update_user_panel update refused, reopening: {response.message}")
         with run.ui_lock:
+            if run.ui_closed or run.ui_goal_handle is not goal_handle:
+                # The run ended, or a newer goal has already replaced this
+                # one (e.g. an earlier refusal already reopened it) -- this
+                # stale refusal has nothing left to do.
+                return
             run.ui_goal_handle = None
-        self._ui_open_goal(run, request_payload, token)
+        self.get_logger().info(f"update_user_panel update refused, reopening: {response.message}")
+        self._ui_open_goal(run, token)
 
-    def _ui_open_goal(self, run: "_Run", request_payload: dict, token: bytes) -> bool:
+    def _ui_open_goal(self, run: "_Run", token: bytes) -> bool:
         if not self._ui_request_client.server_is_ready():
             self.get_logger().warning("ui_bridge_node's ~/request_user_input server unavailable")
             return False
+        with run.ui_lock:
+            # The run's full merged desired state, not just whichever call
+            # triggered this (re)open -- so a replacement goal always carries
+            # forward previously-set panel/objects/selection content.
+            request_payload = dict(run.ui_desired_state)
+            run.ui_opening = True
         goal = RequestUserInput.Goal(
             engine_id=self.get_name(), token=list(token), request_json=json.dumps(request_payload)
         )
@@ -609,12 +674,17 @@ class CapabilityEngine(Node):
         try:
             goal_handle = send_future.result()
         except Exception as error:
+            with run.ui_lock:
+                run.ui_opening = False
             self.get_logger().warning(f"RequestUserInput goal send failed: {error!r}")
             return
         if goal_handle is None or not goal_handle.accepted:
+            with run.ui_lock:
+                run.ui_opening = False
             self.get_logger().warning("RequestUserInput goal rejected")
             return
         with run.ui_lock:
+            run.ui_opening = False
             if run.ui_closed:
                 # The run ended (_ui_close() already ran) while this goal's
                 # acceptance was still in flight -- don't leave it dangling

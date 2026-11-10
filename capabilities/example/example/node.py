@@ -109,14 +109,20 @@ class Capability(CapabilityEngine):
         return {"counted_to": to}
 
     def _wait_for_stop(self, duration: float, ctx) -> dict | None:
-        """Sleeps `duration` seconds in short steps, checkpointing (honours
-        pause/cancel) and polling for the Stop button throughout -- not just
-        once beforehand -- so a tap during any interval, including the
-        action's last one, is never missed. Returns the Stop event as soon as
-        it's seen, else None once the full duration has elapsed."""
-        deadline = time.monotonic() + duration
+        """Sleeps `duration` seconds in short steps, honouring cancel and
+        polling for the Stop button throughout -- not just once beforehand --
+        so a tap during any interval, including the action's last one, is
+        never missed. Deliberately does NOT call ctx.checkpoint() to honour a
+        pause: checkpoint() blocks for the whole pause, which would stop this
+        loop from reaching poll_ui_event() and make the Stop button unable to
+        end a paused action. Instead this keeps polling (and still raises
+        Cancelled promptly) while paused, and only counts a paused tick
+        towards `duration` once the pause lifts. Returns the Stop event as
+        soon as it's seen, else None once the full duration has elapsed."""
+        remaining = duration
         while True:
-            ctx.checkpoint()
+            if ctx.cancelled():
+                ctx.checkpoint()  # raises Cancelled; never blocks since cancelled() is already true
             event = ctx.poll_ui_event()
             if (
                 event is not None
@@ -124,10 +130,14 @@ class Capability(CapabilityEngine):
                 and event.get("button_id") == "stop"
             ):
                 return event
-            remaining = deadline - time.monotonic()
+            if ctx.paused():
+                time.sleep(self._UI_POLL_PERIOD_S)
+                continue
             if remaining <= 0:
                 return None
-            time.sleep(min(self._UI_POLL_PERIOD_S, remaining))
+            step = min(self._UI_POLL_PERIOD_S, remaining)
+            time.sleep(step)
+            remaining -= step
 
 
 def main():
