@@ -2,8 +2,10 @@
 go, the retreat, and leaving impedance. Ported from RAMMP-table's kinova_arm.py (2026-10-26).
 
 1. settle: an IMPEDANCE goal holding the line's start for `settle_s` (execute_joint_trajectory);
-   the hand must then be still -- the arm sags a little when it goes compliant, and that must be
-   over before the descent, or it looks like motion.
+   the hand must then be still -- the arm sags a little when it goes compliant. settle_s 0 skips
+   it: the arm goes compliant as the descent starts, and contact is ignored until the command has
+   gone `contact_ignore_m` down (plan.contact_armed), by when the sag is over. The impedance lag
+   used for the hold is then measured there, as the hand's height against the command's.
 2. descent: the planned straight line down, self.arm.move_joints in impedance. Its monitor records
    every new /ee_state message (pose, twist, wrench, phase) for plot_descent.py and stops on
    contact (plan.VzContact): move_joints CANCELS the goal, and the hold goes out right after.
@@ -33,7 +35,16 @@ import rammp_arm
 from capability_engine.arm import IMPEDANCE, LATEST_WINS, POSITION, SUCCESSFUL
 from rammp_arm import JOINTS, _unwrap_from
 
-from .plan import Refused, VzContact, contact_gate, descent_speed_scale, hold_point, plan_retreat
+from .plan import (
+    Refused,
+    VzContact,
+    commanded_z,
+    contact_armed,
+    contact_gate,
+    descent_speed_scale,
+    hold_point,
+    plan_retreat,
+)
 
 LOOSE_TOL_RAD = 0.5  # path/goal tolerance of the impedance moves: the compliant arm lags and is held back
 # by the table; the monitor watches instead
@@ -140,16 +151,20 @@ def lower(arm, model, descent, cfg, rec, log):
         exit_impedance(arm, log)
         return Refused(f"STOPPED: {why} -- nothing let go")
 
-    # 1. settle in impedance on the line's start
-    rec.phase = "settle"
-    log(f"impedance on (kq {gains['kq'][0]:g}..), holding the start {cfg['settle_s']:.1f} s ...")
-    res = hold_goal(arm, line[0], gains, hold_s=cfg["settle_s"])
-    if res.error_code != SUCCESSFUL:
-        raise fail(f"the impedance hold at the start ended {res.error_string}")
-    if not wait_still(arm, SETTLE_WAIT_S, SETTLE_STILL_S, rec):
-        raise fail(f"the hand is not still in impedance after {cfg['settle_s'] + SETTLE_WAIT_S:.0f} s -- not lowering")
-    lag = float(arm.ee_state().position[2]) - line_z[0]
-    log(f"settled, hand {lag * 100:+.1f} cm {'above' if lag >= 0 else 'below'} the planned start")
+    # 1. settle in impedance on the line's start (settle_s 0: none, the lag is measured on the way down)
+    lag = None
+    if cfg["settle_s"] > 0:
+        rec.phase = "settle"
+        log(f"impedance on (kq {gains['kq'][0]:g}..), holding the start {cfg['settle_s']:.1f} s ...")
+        res = hold_goal(arm, line[0], gains, hold_s=cfg["settle_s"])
+        if res.error_code != SUCCESSFUL:
+            raise fail(f"the impedance hold at the start ended {res.error_string}")
+        if not wait_still(arm, SETTLE_WAIT_S, SETTLE_STILL_S, rec):
+            raise fail(
+                f"the hand is not still in impedance after {cfg['settle_s'] + SETTLE_WAIT_S:.0f} s -- not lowering"
+            )
+        lag = float(arm.ee_state().position[2]) - line_z[0]
+        log(f"settled, hand {lag * 100:+.1f} cm {'above' if lag >= 0 else 'below'} the planned start")
 
     # 2. the line down, stopped on contact
     lengths = np.abs(np.diff(zs))
@@ -159,14 +174,24 @@ def lower(arm, model, descent, cfg, rec, log):
     if samples is None:
         raise fail("the line down is too short to move")
     duration, length = float(samples[0][-1]), float(np.sum(lengths))
-    contact = VzContact(stop=cfg["vz_stop"])
-    state = dict(t0=None, z=None)
+    # "moving" scales with lower_speed (0.01 at the tuned 0.02), as the speed gate does
+    contact = VzContact(stop=cfg["vz_stop"], moving=0.5 * cfg["lower_speed"])
+    state = dict(t0=None, z=None, lag=lag)
 
     def monitor():
         ee, new = rec.poll(arm)
         state["t0"] = state["t0"] or time.monotonic()  # the goal's clock, from its first poll
         u = (time.monotonic() - state["t0"]) / duration
-        hit = new and contact.update(float(ee.linear[2]))
+        armed = contact_armed(u, length, cfg["contact_ignore_m"])
+        if armed and state["lag"] is None:
+            # No settle: the impedance lag is the hand against the command, here. Only a sag (hand
+            # below) counts: a hand trailing above would put the hold deeper, pressing harder.
+            state["lag"] = min(float(ee.position[2]) - commanded_z(line_z, u), 0.0)
+            log(
+                f"contact armed {cfg['contact_ignore_m'] * 100:.0f} cm down; "
+                f"impedance lag {state['lag'] * 100:+.1f} cm"
+            )
+        hit = new and contact.update(float(ee.linear[2]), armed)
         if hit and contact_gate(u, length, duration, cfg["lower_speed"]):
             state["z"] = float(ee.position[2])
             rec.phase = "contact"
@@ -180,7 +205,9 @@ def lower(arm, model, descent, cfg, rec, log):
     rec.phase = "descend"
     log(
         f"lowering: {length * 100:.0f} cm in {duration:.0f} s (impedance), ~{cfg['lower_speed'] * 100:.0f} cm/s "
-        f"where the table should be ({meet * 100:.0f}% down); contact = vz back up to {cfg['vz_stop'] * 100:+.1f} cm/s"
+        f"where the table should be ({meet * 100:.0f}% down); "
+        f"contact = vz back up to {cfg['vz_stop'] * 100:+.1f} cm/s, "
+        f"not in the first {cfg['contact_ignore_m'] * 100:.0f} cm"
     )
     ok = arm.move_joints(line[1:], cart_lengths=lengths, speed_scale=scale, impedance=compliant(gains), monitor=monitor)
     if state["z"] is None:
@@ -191,6 +218,7 @@ def lower(arm, model, descent, cfg, rec, log):
         )
 
     # 3. hold a little below the contact point
+    lag = state["lag"] or 0.0
     q = hold_point(line, line_z, state["z"] - lag - cfg["hold_press"])
     hold_q = np.asarray(arm.raw_joints() if q is None else q, dtype=float)
     hold_goal(arm, hold_q, gains)

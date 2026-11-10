@@ -90,6 +90,40 @@ def test_vz_contact_needs_the_hand_to_have_moved_down():
     assert not any(c.update(v) for v in [0.0, -0.002, 0.001, 0.0, 0.0])  # settling, never moving
 
 
+def test_vz_contact_ignores_the_sag_before_it_is_armed():
+    """No settle: the arm sags ~1 cm as it goes compliant (down, then still) before the descent
+    gets going. Unarmed, that is forgotten; armed, the same trace is a contact."""
+    sag = [-0.02] * 10 + [0.0] * 10
+    c = plan.VzContact(stop=-0.01)
+    assert not any(c.update(v, armed=False) for v in sag)
+    assert not c.moved and c.count == 0
+    armed = plan.VzContact(stop=-0.01)
+    assert any(armed.update(v) for v in sag)  # what it would have read
+
+
+def test_contact_arms_after_the_ignored_drop():
+    length = 0.30
+    assert not plan.contact_armed(0.0, length, 0.03)
+    u = plan.minjerk_time(0.03 / length)
+    assert not plan.contact_armed(u - 0.01, length, 0.03) and plan.contact_armed(u + 0.01, length, 0.03)
+    assert plan.contact_armed(plan.minjerk_time(0.5) + 0.01, 0.04, 0.03)  # a short line: half of it
+    line_z = [0.50, 0.40, 0.30]
+    assert plan.commanded_z(line_z, 0.0) == pytest.approx(0.50)
+    assert plan.commanded_z(line_z, 0.5) == pytest.approx(0.40)
+    assert plan.commanded_z(line_z, 1.0) == pytest.approx(0.30)
+
+
+def test_lowering_speed_and_contact_threshold_must_fit():
+    plan.check_lowering(0.02, -0.01, 0.16)  # the tuned values
+    plan.check_lowering(0.04, -0.02, 0.16)  # faster, threshold scaled
+    with pytest.raises(plan.Refused, match="free motion would read as contact"):
+        plan.check_lowering(0.01, -0.01, 0.16)  # slower, threshold not scaled
+    with pytest.raises(plan.Refused, match="peak the line down"):
+        plan.check_lowering(0.12, -0.05, 0.16)
+    with pytest.raises(plan.Refused, match="above 0"):
+        plan.check_lowering(0.0, -0.01, 0.16)
+
+
 def test_descent_passes_the_table_at_the_tuned_speed():
     """move_joints times the line minimum-jerk; the scale puts 2 cm/s where the table should be."""
     cart_speed, lower = 0.16, 0.02

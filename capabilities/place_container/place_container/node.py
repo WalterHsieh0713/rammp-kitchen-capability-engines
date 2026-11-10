@@ -57,8 +57,12 @@ PARAMS = {
     "vz_stop": -0.01,
     # the hold after contact, this far (m) below the contact point, while the gripper opens
     "hold_press": 0.003,
-    # held in impedance at the start this long (s) before going down; must end still
+    # held in impedance at the start this long (s) before going down; must end still. 0 = no pause:
+    # the arm goes compliant as the descent starts (contact_ignore_m covers its sag)
     "settle_s": 3.0,
+    # contact is ignored until the descent's command has gone this far down (m): the sag when the arm
+    # goes compliant must not read as moving down and being stopped
+    "contact_ignore_m": 0.03,
     # contact more than this (m) above where the bottom meets the table = not the table
     "early_stop": 0.03,
     # joint impedance for the settle, lowering, hold, retreat and reset, one set so the stiffness never
@@ -202,6 +206,7 @@ class Capability(CapabilityEngine):
         gripper = float(self.arm.gripper_state().position)
         if gripper < 0.05 and not params.get("allow_empty_gripper", False):
             raise plan.Refused("the gripper is fully open -- it isn't holding the container")
+        plan.check_lowering(self.cfg["lower_speed"], self.cfg["vz_stop"], rammp_arm.CART_SPEED)
         r = float(np.hypot(*spot))
         lo, hi = self.cfg["reach"]
         if not lo <= r <= hi:

@@ -503,13 +503,18 @@ class VzContact:
     """Contact on the way down from the hand's z velocity (/ee_state, + = up): once the hand has
     moved down faster than `moving`, vz at or above `stop` for `hits` new messages in a row = the
     table stopped it. On the flatbot (2026-10-26) the default 0.0 came 4.5 s late: the wrist folded
-    about the fingertips and vz sat at ~-0.5 cm/s; -1 cm/s stops at the touch."""
+    about the fingertips and vz sat at ~-0.5 cm/s; -1 cm/s stops at the touch.
+    update(vz, armed=False) forgets everything seen so far: the sag when the arm goes compliant at
+    the start of the descent (a drop, then still) must not read as moving down and stopping."""
 
     def __init__(self, stop=-0.01, moving=0.01, hits=2):
         self.stop, self.moving, self.need = stop, moving, hits
         self.moved, self.count = False, 0
 
-    def update(self, vz):
+    def update(self, vz, armed=True):
+        if not armed:
+            self.moved, self.count = False, 0
+            return False
         self.moved = self.moved or vz < -self.moving
         self.count = self.count + 1 if self.moved and vz >= self.stop else 0
         return self.count >= self.need
@@ -549,6 +554,39 @@ def descent_speed_scale(meet, lower_speed, cart_speed):
     u = minjerk_time(min(max(meet, 0.05), 0.95))
     peak = min(lower_speed / (minjerk_speed(u) / minjerk_speed(0.5)), MAX_PEAK * lower_speed)
     return peak / cart_speed
+
+
+def contact_armed(u, length, ignore_m):
+    """Whether contact may be called yet at time fraction u of a descent `length` long: the command
+    has gone at least `ignore_m` down (at most half the line). Without a settle, the arm goes
+    compliant as the descent starts and sags a little; that is over within the first few cm."""
+    return minjerk_distance(u) * length >= min(ignore_m, 0.5 * length)
+
+
+def commanded_z(line_z, u):
+    """Where the descent's command is at time fraction u: line_z (heights along the straight line
+    down, falling) moved minimum-jerk from its first to its last."""
+    return float(line_z[0] - minjerk_distance(u) * (line_z[0] - line_z[-1]))
+
+
+def check_lowering(lower_speed, vz_stop, cart_speed):
+    """Refused unless the contact test works at lower_speed: the line down must not peak above
+    cart_speed (move_joints' Cartesian speed), and vz_stop must sit between a hand moving down at
+    the gate's speed (CONTACT_GATE x lower_speed) and one stopped, or free motion reads as contact."""
+    if lower_speed <= 0:
+        raise Refused(f"lower_speed is {lower_speed} m/s -- it must be above 0 (0.02 is the tuned value)")
+    top = cart_speed / MAX_PEAK
+    if lower_speed > top:
+        raise Refused(
+            f"lower_speed {lower_speed * 100:.1f} cm/s would peak the line down above arm.cart_speed "
+            f"({cart_speed * 100:.0f} cm/s): at most {top * 100:.1f} cm/s"
+        )
+    if not -CONTACT_GATE * lower_speed < vz_stop <= 0.0:
+        raise Refused(
+            f"vz_stop {vz_stop * 100:+.1f} cm/s doesn't fit lower_speed {lower_speed * 100:.1f} cm/s: it must be above "
+            f"{-CONTACT_GATE * lower_speed * 100:+.1f} cm/s (free motion would read as contact) and at most 0 -- "
+            f"about -0.5 x lower_speed ({-0.5 * lower_speed * 100:+.1f} cm/s)"
+        )
 
 
 def contact_gate(u, length, duration, lower_speed):

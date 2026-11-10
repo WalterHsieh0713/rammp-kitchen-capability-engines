@@ -39,8 +39,11 @@ params:
   vz_stop: -0.01
   # The hold after contact, this far (m) below the contact point, while the gripper opens.
   hold_press: 0.003
-  # Held in impedance at the start this long (s) before going down; must end still.
+  # Held in impedance at the start this long (s) before going down; must end still. 0 = no pause.
   settle_s: 3.0
+  # Contact is ignored until the descent's command has gone this far down (m): the sag when the arm
+  # goes compliant must not read as contact.
+  contact_ignore_m: 0.03
   # Contact more than this (m) above where the bottom meets the table = not the table.
   early_stop: 0.03
   # Joint impedance for the settle, lowering, hold, retreat and reset (one set: the stiffness never changes
