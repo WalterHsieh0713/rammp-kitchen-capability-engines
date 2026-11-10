@@ -42,6 +42,7 @@ from .plan import (
     contact_armed,
     contact_gate,
     descent_speed_scale,
+    explain_failure,
     hold_point,
     plan_retreat,
 )
@@ -211,10 +212,13 @@ def lower(arm, model, descent, cfg, rec, log):
     )
     ok = arm.move_joints(line[1:], cart_lengths=lengths, speed_scale=scale, impedance=compliant(gains), monitor=monitor)
     if state["z"] is None:
+        z_now = float(model.fk(arm.raw_joints())[2, 3])
         raise fail(
-            f"went down {length * 100:.0f} cm without stopping on anything"
+            f"went down {length * 100:.0f} cm without stopping on anything (tool now at z={z_now:.3f} m, "
+            f"{(z_now - cfg['table_z']) * 100:.0f} cm above the marked table). Next: the table is lower than marked "
+            "or the spot is off it -- mark it again"
             if ok
-            else f"the descent failed ({arm.last_error})"
+            else "the descent failed: " + explain_failure(arm.last_error, ["lower"])
         )
 
     # 3. hold a little below the contact point
@@ -228,7 +232,8 @@ def lower(arm, model, descent, cfg, rec, log):
     if rest > cfg["early_stop"]:
         raise Refused(
             f"STOPPED: the hand stopped at tool z={z_tool:.3f}, {rest * 100:.0f} cm above where the bottom meets "
-            "the table -- it hit something else; NOT letting go (holding in impedance)"
+            "the table -- it hit something else; NOT letting go (holding in impedance). Next: look at what is under "
+            "the container; take it out of the hand, then reset"
         )
     log(f"contact at tool z={z_tool:.3f}")
     return hold_q
@@ -278,7 +283,7 @@ def back_out(arm, model, q_start, cfg, rec, log, release=0.0):
         monitor=record_only,
     )
     if not ok:
-        raise Refused(f"STOPPED: the retreat did not complete ({arm.last_error})")
+        raise Refused("STOPPED in the retreat (gripper open): " + explain_failure(arm.last_error, ["retreat"]))
     wait_still(arm, 3.0, rec=rec)
     rec.phase = "done"
 
@@ -295,4 +300,11 @@ def joint_moves(arm, model, moves, cfg, log, tol_deg=3.0):
         (target,) = _unwrap_from(arm.raw_joints(), [q])
         off = float(np.max(np.abs(np.degrees(np.asarray(arm.raw_joints()) - target))))
         if not ok or off > tol_deg:
-            raise Refused(f"STOPPED: {name} ended {off:.1f} deg off ({arm.last_error or 'done'})")
+            raise Refused(
+                f"STOPPED: {name} ended {off:.1f} deg from its target (max {tol_deg:.0f}). "
+                + (
+                    explain_failure(arm.last_error, [name])
+                    if arm.last_error
+                    else "Next: check what held it, then reset"
+                )
+            )

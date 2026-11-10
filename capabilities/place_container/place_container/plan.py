@@ -14,6 +14,8 @@ The hand holds the container level with the camera on its right (tool x up, tool
 pointed `pitch` deg down so the far side touches the table before the fingers.
 """
 
+import re
+
 import numpy as np
 from capability_engine import sim
 from rammp_arm import CONTINUOUS, TOOL_Z
@@ -207,7 +209,11 @@ def plan_segment(model, q_from, pos_to, quat_to, table_z, name, depth=0):
     keeps the container level and above the table. [(name, q), ...]."""
     q_to = model.ik(pos_to, quat_to, q_from)
     if q_to is None:
-        raise Refused(f"{name}: no IK solution for the tool at {np.round(pos_to, 3).tolist()}")
+        raise Refused(
+            f"{name}: no arm pose puts the tool at {np.round(pos_to, 3).tolist()} m "
+            f"({np.hypot(*pos_to[:2]):.2f} m from the base axis) -- out of reach or joint limits; "
+            "move the spot or the start position"
+        )
     jump = float(np.max(np.abs(wrap_deg(q_to - q_from))))
     problems = check_joint_move(model, q_from, q_to, table_z)
     if jump <= MAX_STEP_JUMP_DEG and not problems:
@@ -239,7 +245,10 @@ def plan_descent(model, q_start, floor_z, step=PATH_STEP, log=None):
                     log(f"note: the arm can only go {got * 100:.0f} cm straight down from here (reach / joint limits)")
                 zs = zs[: len(qs)]
                 break
-            raise Refused(f"lower: can't go straight down from z={T[2, 3]:.3f}")
+            raise Refused(
+                f"lower: the arm can't go straight down from tool z={T[2, 3]:.3f} m at "
+                f"{np.hypot(T[0, 3], T[1, 3]):.2f} m from the base axis (reach / joint limits) -- move the spot"
+            )
         qs.append(q)
         seed = q
     return np.asarray(zs), np.array(qs)
@@ -475,14 +484,14 @@ def contact_zone_checks(model, descent, table_z):
     container should meet the table to the end of the retreat from there. A retreat that can't be
     planned from there is left out (the real one starts at the contact and is planned again)."""
     zs, qs = descent
-    checks = [("the bottom of the line down", qs[0], qs[-1])]
+    checks = [("lower", qs[0], qs[-1])]  # to the bottom of the line down
     q_meet = hold_point(qs, zs, table_z + BOWL_DEPTH)
     q_meet = np.asarray(qs[-1] if q_meet is None else q_meet, dtype=float)
     try:
         retreat = plan_retreat(model, q_meet)
     except Refused:
         return checks
-    checks.append(("the end of the retreat", q_meet, retreat[-1]))
+    checks.append(("retreat", q_meet, retreat[-1]))  # to its end
     return checks
 
 
@@ -594,3 +603,92 @@ def contact_gate(u, length, duration, lower_speed):
     (at the start and end of a minimum-jerk move it is slow, and a hand that slows with its command
     must not read as stopped by the table)."""
     return 0.0 < u < 1.0 and minjerk_speed(u) * length / duration >= CONTACT_GATE * lower_speed
+
+
+# -- failures, explained ------------------------------------------------------------------------
+
+RESET_LEGS = ("up", "start", "reset")  # a reset's targets: a refusal there is about the start position
+
+
+def _where(name, targets):
+    pos = (targets or {}).get(name)
+    if pos is None:
+        return ""
+    r = np.hypot(pos[0], pos[1])
+    return f" (tool to x={pos[0]:.2f} y={pos[1]:.2f} z={pos[2]:.2f} m, {r:.2f} m from the base axis)"
+
+
+def explain_failure(error, legs, targets=None):
+    """A motion's failure as: what happened, where (the target, m in arm_mount), and what to do next,
+    followed by the driver's own words. `error` is self.arm.last_error or a cuRobo plan's message;
+    the driver prefixes a multi-target goal's planning failure with `leg k/N:` (k from 1), which is
+    read against `legs`, our names for the targets in order. `targets`: name -> tool position."""
+    raw = re.sub(r"^\s*RammpArm:\s*", "", str(error or "no message")).strip()
+    m = re.search(r"\bleg (\d+)/(\d+):\s*(.*)", raw)
+    if m and 1 <= int(m.group(1)) <= len(legs):
+        leg = legs[int(m.group(1)) - 1]
+    else:
+        leg = legs[0] if len(legs) == 1 else None
+    up = raw.upper()
+    on = f"the {leg} leg" if leg else "the motion"
+    at = _where(leg, targets) if leg else ""
+    nothing = " Nothing moved." if "PLANNING_FAILED" in up or (m is None and "planner" in raw.lower()) else ""
+    reset = leg is not None and leg.split("'")[0] in RESET_LEGS
+    if "STATETIMEOUT" in up or "NO /JOINT_STATES" in up:
+        what = "the arm driver's state (/joint_states, /ee_state, /gripper_state) isn't arriving"
+        nxt = "check the arm node is up (sheppy) and ROS_DOMAIN_ID matches, then run again"
+    elif "ACTION SERVER" in up:
+        what, nxt = (
+            "the cuRobo planner is not running",
+            "start it with the flatbot profile (sheppy up flatbot), then run again",
+        )
+    elif "PLANNER BUSY" in up:
+        what, nxt = "the planner was busy with another goal", "wait for that goal to end, then run again"
+    elif "INVALID_START" in up or "START COLLIDES" in up:
+        what = (
+            "cuRobo won't plan from where the arm is: it is inside (or within the 2 cm padding of) "
+            "the chair's collision volumes"
+        )
+        nxt = (
+            "move the arm clear of the chair and the person (they are physical cardboard: don't push into "
+            "them), then run "
+            "again. If it is visibly clear, the volumes in rammp-deployments flatbot/curobo may be off"
+        )
+    elif "COLLI" in up:
+        what = (
+            f"the {leg or 'motion'}'s target is inside the chair's collision volumes"
+            if leg
+            else "the path collides with the chair's collision volumes"
+        )
+        nxt = (
+            "the saved start position is inside them: put the arm somewhere clear and run reset with save"
+            if reset
+            else "move the spot further from the chair (forward, or away from the person's side), mark it again"
+        )
+    elif re.search(r"\bIK[_ ]?FAIL|\bNO IK\b|\bIK SOLUTION", up):
+        what = f"no arm pose reaches {on}'s target"
+        nxt = "it is out of the arm's reach or joint limits: move the spot within the reach param (mark it again)"
+    elif "CONSTRAINT_VIOLATED" in up or re.search(r"\bHOLD\b", up):
+        what = f"cuRobo could not keep the container level on {on}"
+        nxt = "run again with adjust_mode:=joints, or blend:=false"
+    elif re.search(r"\bBLEND:", up):
+        what, at = "every leg planned, but they could not be joined into one motion", ""
+        nxt = "lower blend_radius_near / blend_radius_far, or blend:=false"
+    elif any(k in up for k in ("TRAJOPT", "DT_EXCEPTION", "FINETUNE", "PLANNING_FAILED", "NO PLAN")):
+        what = f"cuRobo found no smooth path for {on}"
+        nxt = "run again (cuRobo's search is random); if it repeats, start further from the chair, or blend:=false"
+    elif "CM FROM THE GOAL" in up or "JOINTS WITHIN" in up:
+        what = f"the arm stopped short of {on}'s target"
+        nxt = "look for something it touched that cuRobo doesn't know (the table, a cardboard volume), then reset"
+    elif re.search(r"HALTED|E-?STOP|CONTROLTAKEN|TOOK CONTROL", up):
+        what = "the driver halted the motion: e-stop, or another sender took control of the arm"
+        nxt = "release the e-stop / check who holds control, then reset"
+    elif "PATH_TOLERANCE" in up:
+        what = "the arm left its planned path (pushed, or blocked by something)"
+        nxt = "check what it touched, then reset"
+    elif "INVALID_GOAL" in up or "NOT_AUTHORIZED" in up or "SUPERVISOR" in up:
+        what = "the driver refused the motion: this node does not hold control of the arm"
+        nxt = "check that the orchestrator granted the arm (or nothing else holds it standalone), then run again"
+    else:
+        what, nxt = f"{on} did not complete", "see the driver's message below; reset, then run again"
+    return f"{what}{at}.{nothing} Next: {nxt}. [driver: {raw}]"

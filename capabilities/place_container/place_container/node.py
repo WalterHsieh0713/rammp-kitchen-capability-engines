@@ -186,6 +186,10 @@ class Capability(CapabilityEngine):
             return {**self._reset(model, params, execute, log), "note": note}
         except plan.Refused as e:
             raise EngineError("refused", str(e), recoverable=True) from e
+        except ArmError as e:  # the driver or its state, outside this capability (Cancelled is not one)
+            # (the engine logs every EngineError's message as an error: /rosout, and a run's bag)
+            why = plan.explain_failure(f"{type(e).__name__}: {e}", [action_id])
+            raise EngineError(type(e).__name__, why, recoverable=True) from e
 
     # -- actions -------------------------------------------------------------------------------
 
@@ -205,7 +209,11 @@ class Capability(CapabilityEngine):
         self._check_tool_frame(model, q_now, log)
         gripper = float(self.arm.gripper_state().position)
         if gripper < 0.05 and not params.get("allow_empty_gripper", False):
-            raise plan.Refused("the gripper is fully open -- it isn't holding the container")
+            raise plan.Refused(
+                f"the gripper is at {gripper:.2f} (0 = open; under 0.05 holds nothing): "
+                "it isn't holding the container. "
+                "Close it on the lip, or set allow_empty_gripper for an empty test run"
+            )
         plan.check_lowering(self.cfg["lower_speed"], self.cfg["vz_stop"], rammp_arm.CART_SPEED)
         r = float(np.hypot(*spot))
         lo, hi = self.cfg["reach"]
@@ -235,6 +243,8 @@ class Capability(CapabilityEngine):
             "table and what is on it are NOT in its world -- keep the way to the spot clear"
         )
         if not execute:
+            if self.cfg["blend"] and self.cfg["curobo_check"]:
+                self._check_carry(info["waypoints"], log)
             self._check_contact_zone(model, descent, table_z, log)
             log("DRY RUN -- all checks passed, nothing commanded")
             return {"executed": False, "plan": steps}
@@ -248,7 +258,11 @@ class Capability(CapabilityEngine):
         q_top = self._joints()
         tilt = model.tilt(q_top)
         if tilt > 1.0:
-            raise plan.Refused(f"STOPPED: the container is {tilt:.1f} deg off its hold after the moves")
+            raise plan.Refused(
+                f"STOPPED above the spot: the container is {tilt:.1f} deg off level after the carrying motion "
+                "(max 1.0); "
+                "nothing let go. Next: reset, then run again with adjust_mode:=joints or blend:=false"
+            )
         # The line down again, from where the arm IS: go_to_ee_pose lets cuRobo choose the joints, and a
         # line planned from other joints would start with a jump between the two postures.
         descent = plan.plan_descent(model, q_top, info["floor_z"], log=log)
@@ -279,7 +293,11 @@ class Capability(CapabilityEngine):
     def _retreat(self, model, execute, log):
         gripper = float(self.arm.gripper_state().position)
         if gripper > lower.OPEN_STALLED:
-            raise plan.Refused("the gripper is still closed -- backing out would drag what it holds; open it first")
+            raise plan.Refused(
+                f"the gripper is at {gripper:.2f}, still closed past {lower.OPEN_STALLED} -- "
+                "backing out would drag what "
+                "it holds. Open it, then retreat"
+            )
         q = self._joints()
         line = plan.plan_retreat(model, q, log=log)
         end = model.fk(line[-1])[:3, 3]
@@ -320,7 +338,9 @@ class Capability(CapabilityEngine):
             names = " -> ".join(n for n, _ in moves)
             log(f"-> reset: {names} (go_to_joint_configs, speed x{self.cfg['go_to_speed_scale']}, blend {radii})")
             if not self.arm.go_to_joint_configs(targets, "reset"):
-                raise plan.Refused(f"STOPPED: reset did not complete ({self.arm.last_error})")
+                legs = [n for n, _ in moves]
+                where = {n: model.fk(q)[:3, 3] for n, q in moves}
+                raise plan.Refused("STOPPED in reset: " + plan.explain_failure(self.arm.last_error, legs, where))
         self.arm.gripper(1.0)  # ready for the next run, up here clear of the container
         log("Back at the start position.")
         return {"executed": True, "plan": steps}
@@ -333,7 +353,9 @@ class Capability(CapabilityEngine):
     def _ready(self):
         why = self.arm.not_ready()
         if why is not None:
-            raise plan.Refused(why)
+            raise plan.Refused(
+                f"the arm can't be commanded now: {why}. Next: clear that (e-stop, control), then run again"
+            )
 
     def _carry(self, waypoints, table_z, ctx, log):
         """adjust -> lift -> transit as ONE go_to_ee_poses motion: cuRobo plans every leg around the
@@ -348,7 +370,9 @@ class Capability(CapabilityEngine):
             (q,) = _unwrap_from(self.arm.raw_joints(), [w["q"]])
             log(f"-> adjust (go_to_joint_config, speed x{speed})")
             if not self.arm.go_to_joint_config(q, "adjust", speed_scale=speed):
-                raise plan.Refused(f"STOPPED: adjust did not complete ({self.arm.last_error})")
+                raise plan.Refused(
+                    "STOPPED: " + plan.explain_failure(self.arm.last_error, ["adjust"], {"adjust": w["pos"]})
+                )
         if poses:
             radii = plan.blend_radii(poses, table_z, self.cfg["blend_radius_near"], self.cfg["blend_radius_far"])
             targets = [
@@ -366,14 +390,17 @@ class Capability(CapabilityEngine):
             ctx.progress(names[0] if len(names) == 1 else "carry", 0.0)
             log(f"-> {label} (go_to_ee_poses, one motion, speed x{speed}, blend {radii} m)")
             if not self.arm.go_to_ee_poses(targets, label):
-                raise plan.Refused(f"STOPPED: {label} did not complete ({self.arm.last_error})")
+                where = {w["name"]: w["pos"] for w in poses}
+                raise plan.Refused("STOPPED: " + plan.explain_failure(self.arm.last_error, names, where))
         for w in waypoints:
             if w.get("joints"):  # transit-reconfigure: to these exact joints, the posture that reaches
                 ctx.progress(w["name"], 0.0)
                 (q,) = _unwrap_from(self.arm.raw_joints(), [w["q"]])
                 log(f"-> {w['name']} (go_to_joint_config, speed x{speed})")
                 if not self.arm.go_to_joint_config(q, w["name"], speed_scale=speed):
-                    raise plan.Refused(f"STOPPED: {w['name']} did not complete ({self.arm.last_error})")
+                    raise plan.Refused(
+                        "STOPPED: " + plan.explain_failure(self.arm.last_error, [w["name"]], {w["name"]: w["pos"]})
+                    )
 
     def _carry_separately(self, model, moves, ctx, log):
         """blend false: each move on its own, as on 2026-10-29 (adjust on move_joints, the rest
@@ -400,7 +427,34 @@ class Capability(CapabilityEngine):
                     orientation_hold=HOLD_LEVEL,
                 )
             if not ok:
-                raise plan.Refused(f"STOPPED: {name} did not complete ({self.arm.last_error})")
+                where = {name: model.fk(q)[:3, 3]}
+                raise plan.Refused("STOPPED: " + plan.explain_failure(self.arm.last_error, [name], where))
+
+    def _check_carry(self, waypoints, log):
+        """Dry run: cuRobo plans each leg of the carrying motion on its own (nothing moves), from our
+        IK joints at the leg before, so a target in the chair's volumes or out of reach is refused
+        before anything moves. The real motion plans them again from where the arm is."""
+        names = [w["name"] for w in waypoints]
+        where = {w["name"]: w["pos"] for w in waypoints}
+        starts = _unwrap_from(self.arm.raw_joints(), [w["q"] for w in waypoints])
+        start = self.arm.raw_joints()
+        for k, w in enumerate(waypoints):
+            joints = w.get("joints") or (k == 0 and self.cfg["adjust_mode"] == "joints")
+            try:
+                if joints:
+                    res = self.arm.plan_to_joints(starts[k], start)
+                else:
+                    hold = HOLD_LEVEL if w["hold"] == "level" else HOLD_NONE
+                    res = self.arm.plan_to_pose(w["pos"], w["quat"], start, hold)
+            except ArmError as e:
+                raise plan.Refused(
+                    f"cuRobo check of {w['name']}: " + plan.explain_failure(f"{type(e).__name__}: {e}", [w["name"]])
+                ) from e
+            if not res.success:
+                why = plan.explain_failure(f"leg {k + 1}/{len(names)}: {res.message}", names, where)
+                raise plan.Refused(f"DRY RUN, cuRobo check: {why}")
+            log(f"cuRobo check: {w['name']} plans ({res.planning_time:.2f} s)")
+            start = starts[k]
 
     def _check_contact_zone(self, model, descent, table_z, log):
         """cuRobo plans (nothing moves) to the ends of the line down and the retreat, which run on
@@ -412,10 +466,15 @@ class Capability(CapabilityEngine):
             try:
                 res = self.arm.plan_to_joints(q_to, q_from)
             except ArmError as e:
-                raise plan.Refused(f"cuRobo check of {label}: the planner did not answer ({e})") from e
+                raise plan.Refused(
+                    f"cuRobo check of {label}: " + plan.explain_failure(f"{type(e).__name__}: {e}", [label])
+                ) from e
             if not res.success:
-                raise plan.Refused(f"cuRobo refuses {label}: {res.message}")
-            log(f"cuRobo check: {label} is clear of the chair's collision volumes")
+                where = {label: model.fk(q_to)[:3, 3]}
+                raise plan.Refused(
+                    f"cuRobo check of {label} (nothing moved): " + plan.explain_failure(res.message, [label], where)
+                )
+            log(f"cuRobo check: the end of {label} is clear of the chair's collision volumes")
 
     def _check_tool_frame(self, model, q, log):
         reported = np.asarray(self.arm.get_state()["ee_pos"][:3], dtype=float)
@@ -426,7 +485,12 @@ class Capability(CapabilityEngine):
             f"model {np.round(modelled, 3).tolist()} ({off * 100:.1f} cm apart)"
         )
         if off > self.cfg["tool_frame_tol"]:
-            raise plan.Refused("the arm's tool frame doesn't match the model's -- check the tool configuration")
+            raise plan.Refused(
+                f"the arm reports its tool frame at {np.round(reported, 3).tolist()} m, the model at "
+                f"{np.round(modelled, 3).tolist()}: {off * 100:.1f} cm apart (tool_frame_tol "
+                f"{self.cfg['tool_frame_tol'] * 100:.1f} cm). Next: check the driver's tool configuration (Robotiq "
+                "2F-85, arm.tool_z 0.12 m) and that the driver's URDF is flatbot's"
+            )
 
     def _spot(self, params, log):
         given = [k for k in ("x", "y", "table_z") if k in params]

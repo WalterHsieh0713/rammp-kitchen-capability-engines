@@ -174,6 +174,46 @@ def test_blend_radii_are_small_below_the_carrying_height_and_zero_at_the_end():
     assert plan.blend_radii([], TABLE_Z, 0.03, 0.05) == []
 
 
+CARRY = ["adjust", "lift", "transit"]
+WHERE = {"transit": [0.45, -0.20, 0.50]}
+
+
+def test_a_failed_leg_is_named_and_placed():
+    msg = plan.explain_failure(
+        "  RammpArm: adjust -> lift -> transit ended PLANNING_FAILED leg 3/3: IK_FAIL: no solution", CARRY, WHERE
+    )
+    assert msg.startswith("no arm pose reaches the transit leg's target (tool to x=0.45 y=-0.20 z=0.50 m")
+    assert "0.49 m from the base axis" in msg and "Nothing moved." in msg and "Next: " in msg
+    assert msg.endswith("[driver: adjust -> lift -> transit ended PLANNING_FAILED leg 3/3: IK_FAIL: no solution]")
+
+
+def test_collisions_with_the_chair_say_what_to_move():
+    start = plan.explain_failure(
+        "ended PLANNING_FAILED leg 1/3: INVALID_START_STATE_WORLD_COLLISION [start collides with person/torso]", CARRY
+    )
+    assert start.startswith("cuRobo won't plan from where the arm is") and "move the arm clear" in start
+    goal = plan.explain_failure("ended PLANNING_FAILED leg 3/3: goal collides with person/knees", CARRY, WHERE)
+    assert "transit's target is inside the chair's collision volumes" in goal and "move the spot" in goal
+    back = plan.explain_failure("ended PLANNING_FAILED leg 2/2: goal collides with seat/backrest", ["up", "start"])
+    assert "saved start position is inside them" in back and "reset with save" in back
+
+
+def test_other_failures_point_at_the_right_fix():
+    def text(e, legs=CARRY):
+        return plan.explain_failure(e, legs)
+
+    assert "adjust_mode:=joints" in text("ended PLANNING_FAILED leg 2/3: CONSTRAINT_VIOLATED tilt 4 deg")
+    assert "could not be joined" in text("ended PLANNING_FAILED blend: DT_EXCEPTION")
+    assert "found no smooth path for the lift leg" in text("ended PLANNING_FAILED leg 2/3: TRAJOPT_FAIL")
+    assert "stopped short" in text("transit: tool 2.3 cm from the goal", ["transit"])
+    assert "e-stop" in text("ended HALTED")
+    assert "not running" in text("adjust: no action server (the go_to_* actions need the cuRobo planner)")
+    assert "busy" in text("ended PLANNING_FAILED leg 1/3: planner busy -- one plan at a time")
+    assert "arm node is up" in text("StateTimeout: no /joint_states, /ee_state or /gripper_state", ["place"])
+    assert text("something new", ["lower"]).startswith("the lower leg did not complete.")
+    assert "smooth" not in text("velocity threshold exceeded", ["lower"])  # 'HOLD' inside a word: not a hold
+
+
 # -- on the flatbot model ---------------------------------------------------------------------
 
 
@@ -254,7 +294,7 @@ def test_the_contact_moves_are_checked_at_their_ends(model):
     q_start = holding_pose(model, SPOT)
     _, descent, _ = plan.plan_place(model, q_start, SPOT, TABLE_Z)
     checks = plan.contact_zone_checks(model, descent, TABLE_Z)
-    assert [c[0] for c in checks] == ["the bottom of the line down", "the end of the retreat"]
+    assert [c[0] for c in checks] == ["lower", "retreat"]
     np.testing.assert_allclose(checks[0][1], descent[1][0])
     np.testing.assert_allclose(checks[0][2], descent[1][-1])
     meet = model.fk(checks[1][1])[2, 3]

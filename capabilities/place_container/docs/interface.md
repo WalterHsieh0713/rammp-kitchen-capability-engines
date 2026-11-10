@@ -51,7 +51,9 @@ Every action is a dry run (plan and check, nothing moves) unless the node runs w
 
 Progress phases of `place`: `carry` (adjust, lift and transit in one motion; with `blend` false or
 `adjust_mode` joints, `adjust`, `lift`, `transit` on their own), `lower`, `open`, `retreat`. A failed
-check ends the action with `refused` and the reason; after contact the arm is left holding in
+check ends the action with `refused` (recoverable) and the reason: what happened, where (m in
+`arm_mount`), what to do next, then the driver's or cuRobo's own words. An error of the arm driver
+itself ends it with the error's name (`StateTimeout`, `ControlTaken`, ...), also recoverable; after contact the arm is left holding in
 impedance, before it in position control.
 
 ## Collision volumes
