@@ -242,10 +242,13 @@ class Capability(CapabilityEngine):
             f"adjust turns the hand {info['adjust_deg']:.1f} deg. cuRobo avoids the chair's collision volumes; the "
             "table and what is on it are NOT in its world -- keep the way to the spot clear"
         )
+        # Before anything moves (no pause at the top): the ends of the line down and the retreat
+        # against the chair's volumes, on the planned line (the one from where the arm ends is the same
+        # line down, a few mm apart at most).
+        self._check_contact_zone(model, descent, table_z, log)
         if not execute:
             if self.cfg["blend"] and self.cfg["curobo_check"]:
                 self._check_carry(info["waypoints"], log)
-            self._check_contact_zone(model, descent, table_z, log)
             log("DRY RUN -- all checks passed, nothing commanded")
             return {"executed": False, "plan": steps}
 
@@ -271,8 +274,6 @@ class Capability(CapabilityEngine):
                 f"STOPPED above the spot: {plan.reach_refusal(descent, table_z, spot)} in the posture cuRobo "
                 "chose -- nothing let go"
             )
-
-        self._check_contact_zone(model, descent, table_z, log)
 
         rec, cfg = lower.Recorder(), {**self.cfg, "table_z": table_z, "bowl_depth": plan.BOWL_DEPTH}
         try:
