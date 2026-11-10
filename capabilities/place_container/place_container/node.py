@@ -173,17 +173,21 @@ RESET = {
 
 class _PanelContext:
     """The action's ctx, with every progress() also put on the user's UI panel in words
-    (ui.progress_panel). Everything else is ctx's own."""
+    (ui.progress_panel). Everything else is ctx's own. `panel` False (standalone: no orchestrator,
+    so no session token) skips the panel altogether instead of a logged no-op on every call."""
 
-    def __init__(self, ctx, action_id):
-        self._ctx, self._action_id = ctx, action_id
+    def __init__(self, ctx, action_id, panel=True):
+        self._ctx, self._action_id, self._panel = ctx, action_id, panel
 
     def __getattr__(self, name):
         return getattr(self._ctx, name)
 
+    def update_user_panel(self, **kwargs):
+        return self._ctx.update_user_panel(**kwargs) if self._panel else False
+
     def progress(self, phase, pct, message="", pausable=True):
         self._ctx.progress(phase, pct, message, pausable)
-        self._ctx.update_user_panel(panel_json=ui.progress_panel(self._action_id, phase, message))
+        self.update_user_panel(panel_json=ui.progress_panel(self._action_id, phase, message))
 
 
 class Capability(CapabilityEngine):
@@ -215,7 +219,7 @@ class Capability(CapabilityEngine):
         """Runs the action with the user's UI panel showing each phase; a failure is shown there too
         (with an OK button, waited for up to ui_error_wait_s) before the action ends with it.
         Standalone (no orchestrator, no session token) every panel call is a logged no-op."""
-        ctx = _PanelContext(ctx, action_id)
+        ctx = _PanelContext(ctx, action_id, panel=self.orchestrated)
         first = {"place": "plan", "reset": "reset", "retreat": "retreat"}.get(action_id, action_id)
         ctx.update_user_panel(panel_json=ui.progress_panel(action_id, first))
         try:
