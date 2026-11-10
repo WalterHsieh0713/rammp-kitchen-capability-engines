@@ -57,7 +57,8 @@ params:
   reset_speed_scale: 1.0
   # and the retreat's peak speed (m/s).
   retreat_speed: 0.06
-  # Spot distance from the arm base axis (m) with the full descent (flatbot, table z 0.198).
+  # Spot distance from the arm base axis (m) with the full descent (flatbot, table z 0.198). Arm
+  # kinematics, measured without the chair volumes: re-measure. Outside it the plan decides.
   reach: [0.70, 1.10]
   # Where the line down can't reach the table in the arm's posture, switch to another posture that can
   # (go_to_joint_config: a bigger move, no level hold); false = refuse instead.
@@ -70,6 +71,9 @@ params:
   tool_frame_tol: 0.015
   # Where the marked spot, the start position and the descent recordings are kept.
   state_dir: /config/place_container
+  # A spot or start position saved before this (unix s) is refused: 2026-11-07 17:56 UTC, when the arm
+  # moved 8 in forward on the flatbot's chair (rammp-deployments #156).
+  state_valid_after: 1794074180.0
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02

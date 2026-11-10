@@ -1,7 +1,8 @@
 """Planning for putting the held container down at a spot on the table. No rclpy: tests offline.
 
 Ported from RAMMP-table's place_bowl.py (the spot path that placed the bowl on a marked sticky note
-on the flatbot, 2026-10-26). Everything is in arm_mount, the driver's gravity-aligned frame: z true
+on the flatbot, 2026-10-26; the arm has since moved 0.2032 m forward on the chair, 2026-11-07, so
+positions from those runs are 0.2032 m off in x). Everything is in arm_mount, the driver's gravity-aligned frame: z true
 up, x forward, y left, origin on the arm base axis. The driver applies the mount (flatbot: 30 deg
 pitch), so there is no tilt correction here.
 
@@ -312,14 +313,17 @@ def find_posture(model, pos, quat, q_from, floor_z, table_z, seeds=40, tries=5, 
     return None
 
 
-def plan_place(model, q_now, spot, table_z, max_adjust=MAX_ADJUST_DEG, allow_reconfigure=False, log=None):
+def plan_place(
+    model, q_now, spot, table_z, max_adjust=MAX_ADJUST_DEG, allow_reconfigure=False, reach=(0.70, 1.10), log=None
+):
     """The whole place from joints q_now: (moves [(name, q)], descent (zs, qs), info).
 
     adjust (square the hand in place to the NEAREST hold) -> lift to SAFE_HEIGHT if lower ->
     transit to above the spot -> the straight line down (descent; aimed PRESS_BELOW under where the
     bottom meets the table, at most MAX_DROP). If the line can't reach the table in the arm's posture,
     find_posture looks for another one; it is used only with allow_reconfigure (the move is then
-    "transit-reconfigure", to those exact joints). Raises Refused with the reason."""
+    "transit-reconfigure", to those exact joints). `reach` (m from the base axis): only the hint in a
+    refusal. Raises Refused with the reason."""
     T_now = model.fk(q_now)
     heading = T_now[:3, 2].copy()
     heading[2] = 0.0
@@ -356,7 +360,10 @@ def plan_place(model, q_now, spot, table_z, max_adjust=MAX_ADJUST_DEG, allow_rec
         why = reach_refusal(descent, table_z, spot)
         other = find_posture(model, above, quat, q_from, floor_z, table_z, log=log)
         if other is None:
-            raise Refused(why + "; no other arm posture reaches it either -- move the spot (0.80-0.95 m is safe)")
+            raise Refused(
+                why + f"; no other arm posture reaches it either -- move the spot to {reach[0]:.2f}-{reach[1]:.2f} m "
+                "from the base axis (the reach param)"
+            )
         if not allow_reconfigure:
             raise Refused(
                 why + "; ANOTHER arm posture reaches it: allow_reconfigure:=true to use it "

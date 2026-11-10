@@ -12,8 +12,11 @@ from scipy.spatial.transform import Rotation
 from place_container import plan
 
 FLATBOT_URDF = Path("/fixtures/urdf/flatbot.urdf")
-TABLE_Z = 0.198  # the flatbot's table, `mark`ed 2026-10-26 (arm_mount)
-SPOT = [0.764, -0.248]  # the sticky note the container was placed on that day
+# Kinematic inputs only: the flatbot's table `mark`ed 2026-10-26 (arm_mount) and the sticky note the
+# container was placed on that day. The arm moved 0.2032 m forward on the chair on 2026-11-07, so the
+# real table is no longer here; the arm's kinematics in arm_mount are unchanged.
+TABLE_Z = 0.198
+SPOT = [0.764, -0.248]
 needs_model = pytest.mark.skipif(not FLATBOT_URDF.exists(), reason="no flatbot model (run in the arm test image)")
 
 

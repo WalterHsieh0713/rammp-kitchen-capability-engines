@@ -36,7 +36,13 @@ from scipy.spatial.transform import Rotation
 
 from . import lower, plan
 
-# ROS parameter -> default: the flatbot's values (2026-10-26).
+# The arm moved 8 in (0.2032 m) forward on the flatbot's chair (rammp-deployments #156, merged
+# 2026-11-07 17:56 UTC). Everything here is in arm_mount, which moved with the arm: the arm's own
+# geometry (flange_to_tip, pitch, reach as kinematics) still holds, but a spot or start position saved
+# before then was saved relative to a chair and table that are now 0.2032 m nearer in x.
+ARM_MOVED = 1794074180.0  # 2026-11-07T17:56:20Z
+
+# ROS parameter -> default: the flatbot's values (2026-10-26, unless noted).
 PARAMS = {
     "allow_execute": False,
     # flange face to the closed fingertips (m): sets where the container centre lands
@@ -70,7 +76,8 @@ PARAMS = {
     # speed_scale of reset's joint moves (move_joints; was ~0.5)
     "reset_speed_scale": 1.0,
     # spot distance from the arm base axis (m) where the whole place plans with the full descent
-    # (flatbot, table z 0.198: test_place_bowl.py --sweep); outside it the plan still decides
+    # (flatbot, table z 0.198: test_place_bowl.py --sweep, 2026-10-29). Arm kinematics only: the sweep
+    # had no chair collision volumes, so re-measure it with the planner's. Outside it the plan decides
     "reach": [0.70, 1.10],
     # where the line down can't reach the table in the arm's posture, switch to another posture that can
     # (go_to_joint_config: a bigger move, cuRobo in joint space, no level hold); off = refuse instead
@@ -83,6 +90,9 @@ PARAMS = {
     "tool_frame_tol": 0.015,
     # where the spot, the start position and the descent recordings are kept
     "state_dir": "/config/place_container",
+    # a spot or start position saved before this (unix s) is refused: the arm has moved on the chair
+    # since (default: ARM_MOVED)
+    "state_valid_after": ARM_MOVED,
 }
 EXECUTE = {"type": "object", "properties": {"execute": {"type": "boolean", "default": False}}}
 PLACE = {
@@ -174,7 +184,10 @@ class Capability(CapabilityEngine):
         r = float(np.hypot(*spot))
         lo, hi = self.cfg["reach"]
         if not lo <= r <= hi:
-            log(f"the spot is {r:.2f} m from the base axis, outside the reach {lo:.2f}-{hi:.2f}; the plan decides")
+            log(
+                f"NOTE: the spot is {r:.2f} m from the arm's base axis, outside the reach param {lo:.2f}-{hi:.2f} m "
+                "(measured without the chair volumes); the plan decides"
+            )
         moves, descent, info = plan.plan_place(
             model,
             q_now,
@@ -182,6 +195,7 @@ class Capability(CapabilityEngine):
             table_z,
             max_adjust=self.cfg["max_adjust_deg"],
             allow_reconfigure=self.cfg["allow_reconfigure"],
+            reach=(lo, hi),
             log=log,
         )
         if info["reconfigure"]:
@@ -347,7 +361,20 @@ class Capability(CapabilityEngine):
         path = self.state_dir / name
         if not path.exists():
             raise plan.Refused(missing)
-        return json.loads(path.read_text())
+        record = json.loads(path.read_text())
+        saved = float(record.get("time", 0.0))
+        if saved < float(self.cfg["state_valid_after"]):
+            when = time.strftime("%Y-%m-%d %H:%M", time.localtime(saved))
+            raise plan.Refused(
+                f"{path} was saved {when}, before the arm moved on the chair "
+                f"(state_valid_after={self.cfg['state_valid_after']:.0f}) -- "
+                + (
+                    "run mark again"
+                    if name == "spot.json"
+                    else "put the arm at a start position and run reset with save"
+                )
+            )
+        return record
 
 
 def main():
