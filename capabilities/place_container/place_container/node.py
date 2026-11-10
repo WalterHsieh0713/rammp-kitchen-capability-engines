@@ -37,12 +37,12 @@ from pathlib import Path
 
 import numpy as np
 import rammp_arm
-from capability_engine import Action, ArmError, CapabilityEngine, EngineError, run
+from capability_engine import Action, ArmError, Cancelled, CapabilityEngine, EngineError, run
 from capability_engine.arm import HOLD_LEVEL, HOLD_NONE, JointTarget, PoseTarget
 from rammp_arm import _unwrap_from
 from scipy.spatial.transform import Rotation
 
-from . import lower, plan
+from . import lower, plan, ui
 
 # The arm moved 8 in (0.2032 m) forward on the flatbot's chair (rammp-deployments #156, merged
 # 2026-11-07 17:56 UTC). Everything here is in arm_mount, which moved with the arm: the arm's own
@@ -138,6 +138,9 @@ PARAMS = {
     # a spot or start position saved before this (unix s) is refused: the arm has moved on the chair
     # since (default: ARM_MOVED)
     "state_valid_after": ARM_MOVED,
+    # a failure is shown on the user's UI panel with an OK button; the action waits this long (s) for
+    # the OK before it ends with the error (the panel closes when the action ends). 0 = don't wait
+    "ui_error_wait_s": 60.0,
 }
 EXECUTE = {"type": "object", "properties": {"execute": {"type": "boolean", "default": False}}}
 PLACE = {
@@ -150,6 +153,8 @@ PLACE = {
         "table_z": {"type": "number"},
         # an empty-gripper test run: don't refuse an open gripper
         "allow_empty_gripper": {"type": "boolean", "default": False},
+        # mock only: fail at this phase (carry, lower, open, retreat) to see the error on the UI
+        "mock_fail": {"type": "string"},
     },
 }
 RESET = {
@@ -164,6 +169,21 @@ RESET = {
         "big_turn": {"type": "boolean", "default": False},
     },
 }
+
+
+class _PanelContext:
+    """The action's ctx, with every progress() also put on the user's UI panel in words
+    (ui.progress_panel). Everything else is ctx's own."""
+
+    def __init__(self, ctx, action_id):
+        self._ctx, self._action_id = ctx, action_id
+
+    def __getattr__(self, name):
+        return getattr(self._ctx, name)
+
+    def progress(self, phase, pct, message="", pausable=True):
+        self._ctx.progress(phase, pct, message, pausable)
+        self._ctx.update_user_panel(panel_json=ui.progress_panel(self._action_id, phase, message))
 
 
 class Capability(CapabilityEngine):
@@ -192,11 +212,58 @@ class Capability(CapabilityEngine):
         )
 
     def execute(self, action_id, params, ctx):
+        """Runs the action with the user's UI panel showing each phase; a failure is shown there too
+        (with an OK button, waited for up to ui_error_wait_s) before the action ends with it.
+        Standalone (no orchestrator, no session token) every panel call is a logged no-op."""
+        ctx = _PanelContext(ctx, action_id)
+        first = {"place": "plan", "reset": "reset", "retreat": "retreat"}.get(action_id, action_id)
+        ctx.update_user_panel(panel_json=ui.progress_panel(action_id, first))
+        try:
+            result = self._act(action_id, params, ctx)
+        except Cancelled:
+            raise
+        except EngineError as e:
+            self._show_error(ctx, action_id, str(e))
+            raise
+        except Exception as e:  # a bug: still say so on the UI, then let the engine report it
+            self._show_error(ctx, action_id, f"Unexpected error ({type(e).__name__}): {e}")
+            raise
+        ctx.update_user_panel(panel_json=ui.done_panel(action_id, "Done"))
+        return result
+
+    def _show_error(self, ctx, action_id, message):
+        """The failure on the user's panel with an OK button; waits for the OK (at most
+        ui_error_wait_s, cancel still ends it) so it is read before the action ends and the panel
+        closes. Returns at once if the panel can't be shown (standalone, no bridge)."""
+        if not ctx.update_user_panel(panel_json=ui.error_panel(action_id, message)):
+            return
+        deadline = time.monotonic() + float(self.cfg["ui_error_wait_s"])
+        while time.monotonic() < deadline and not ctx.cancelled():
+            if ui.is_ok(ctx.poll_ui_event()):
+                return
+            time.sleep(0.1)
+
+    def _mock(self, action_id, params, ctx):
+        """No hardware: place walks through its phases on the panel (ui.MOCK_PHASE_S each), so the
+        UI can be tried in a sim; `mock_fail` (a phase) ends it there with a refusal instead."""
+        fail = params.get("mock_fail")
+        for phase in ui.MOCK_PHASES if action_id == "place" else ():
+            ctx.checkpoint()
+            ctx.progress(phase, 0.0)
+            if phase == fail:
+                raise EngineError(
+                    "refused",
+                    f"mock: a failure at '{phase}', as asked (mock_fail). Next: run again without mock_fail",
+                    recoverable=True,
+                )
+            time.sleep(ui.MOCK_PHASE_S)
+        return {"executed": False, "mock": True}
+
+    def _act(self, action_id, params, ctx):
         execute = bool(params.get("execute", False)) and self.cfg["allow_execute"]
         note = "allow_execute is false: ran as a DRY RUN" if params.get("execute") and not execute else ""
         if self.mock:
-            ctx.progress(action_id, 100.0, "mock: nothing planned or moved")
-            return {"executed": False, "mock": True}
+            return self._mock(action_id, params, ctx)
         log = self.get_logger().info
         try:
             model = plan.Model(self.cfg["flange_to_tip"], self.cfg["pitch_deg"])

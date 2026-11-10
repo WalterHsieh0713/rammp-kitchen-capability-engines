@@ -61,6 +61,19 @@ check ends the action with `refused` (recoverable) and the reason: what happened
 itself ends it with the error's name (`StateTimeout`, `ControlTaken`, ...), also recoverable; after contact the arm is left holding in
 impedance, before it in position control.
 
+## On the user's UI
+
+Every action puts a panel on the UI bridge (`ctx.update_user_panel`, PR #42): a title ("Placing the
+container", ...), the phase in words (checking the plan, carrying it over, lowering it onto the
+table, letting go, backing the hand away) and a progress bar. A failure is shown there with its full
+reason (what happened, where, what to do next) and an OK button; the action waits for the OK (at
+most `ui_error_wait_s`) before it ends with the error, because the panel closes when the action
+ends. Standalone (no orchestrator, so no session token) the panel calls are logged no-ops.
+
+In mock (`mock: true`), `place` walks through its phases on the panel, 1 s each, without hardware,
+and `mock_fail` (a phase: `carry`, `lower`, `open` or `retreat`) ends it there with a refusal, to
+try the error panel in a sim.
+
 ## Collision volumes
 
 On flatbot the cuRobo planner composes the chair's platform, seat and occupant volumes
@@ -118,6 +131,8 @@ contact arming 2026-11-10).
 | `tool_frame_tol`         | `0.015`                                      | The arm's tool frame vs the model's (m)                                                                                                                                              |
 | `state_dir`              | `"/config/place_container"`                  | Where the marked spot, start position and descent recordings are kept                                                                                                                |
 | `state_valid_after`      | `1794074180.0`                               | A spot or start position saved before this (unix s) is refused: when the arm moved on the chair                                                                                      |
+| `ui_error_wait_s`        | `60.0`                                       | A failure waits this long for the OK on the UI panel before the action ends with it (s); 0 = don't wait                                                                              |
+| `ui_bridge_node_name`    | `"ui_bridge_node"`                           | The UI bridge node the panel talks to (declared by the engine)                                                                                                                       |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other; `arm.mock_urdf` names the

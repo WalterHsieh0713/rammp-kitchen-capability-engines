@@ -13,7 +13,7 @@
 # nightly-20261030 is the base the nightly arm driver is built on (interfaces
 # 73e7ed1716bf, which has GoToEEPoses / GoToJointConfigs), so self.arm speaks
 # the driver's exact messages. It carries the arm, common and orchestrator
-# interfaces; rammp_curobo_interfaces it does not.
+# interfaces; rammp_curobo_interfaces and rammp_ui_bridge_interfaces it does not.
 FROM ghcr.io/rammp-org/rammp-base:nightly-20261030
 
 WORKDIR /module_ws
@@ -29,6 +29,12 @@ RUN pip install --no-cache-dir pybullet==3.2.7
 # build it from a pinned RAMMP-CuRobo commit alongside the packages below.
 ADD https://github.com/rammp-org/RAMMP-CuRobo/archive/fd8b89cb18fd854f3add36ab9b1b72933dbabf76.tar.gz /tmp/curobo.tar.gz
 RUN mkdir -p src && tar -xzf /tmp/curobo.tar.gz -C src --strip-components=1 --wildcards '*/rammp_curobo_interfaces' && rm /tmp/curobo.tar.gz
+
+# rammp_ui_bridge_interfaces (the direct engine<->UI-bridge messages behind ctx.update_user_panel /
+# poll_ui_event) is not in the base either: build it from a pinned rammp-interfaces-ros2 commit,
+# as the example does.
+ADD https://github.com/rammp-org/rammp-interfaces-ros2/archive/6f8b81246be0f163a8f0db9ce921ee6d9f4ec60e.tar.gz /tmp/ui_bridge.tar.gz
+RUN mkdir -p src && tar -xzf /tmp/ui_bridge.tar.gz -C src --strip-components=1 --wildcards '*/rammp_ui_bridge_interfaces' && rm /tmp/ui_bridge.tar.gz
 
 COPY capability_engine/ src/capability_engine/
 COPY capabilities/place_container/ src/place_container/

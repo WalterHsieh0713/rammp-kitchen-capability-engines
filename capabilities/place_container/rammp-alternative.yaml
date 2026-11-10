@@ -105,6 +105,9 @@ params:
   # A spot or start position saved before this (unix s) is refused: 2026-11-07 17:56 UTC, when the arm
   # moved 8 in forward on the flatbot's chair (rammp-deployments #156).
   state_valid_after: 1794074180.0
+  # A failure is shown on the user's UI panel with an OK button; the action waits this long (s) for
+  # the OK before it ends with the error. 0 = don't wait.
+  ui_error_wait_s: 60.0
   # arm.*: every tunable of self.arm; see Parameters in docs/interface.md.
   "arm.tool_z": 0.12
   "arm.dt": 0.02
@@ -157,5 +160,8 @@ params:
   "arm.close_stream_wait_s": 1.0
   "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
   "arm.mock_urdf": ""
+  # The UI bridge node ctx.update_user_panel / poll_ui_event talk to (the engine declares it); a
+  # deployment with a differently named bridge overrides this.
+  "ui_bridge_node_name": "ui_bridge_node"
 publishes: [/place_container/status]
 subscribes: []
