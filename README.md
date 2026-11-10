@@ -252,6 +252,23 @@ the orchestrator:
 | `write_world_state(**updates) -> bool`               | Updates the world state. The keys are `gripper`, `doors`, `objects`, `arm` and `base_pose`                |
 | `update_object(instance_id, **fields) -> bool`       | Updates one object's fields in the world state                                                            |
 
+### UI (`ctx`)
+
+`ctx` also talks directly to the UI bridge (`rammp_ui_bridge`), independent of
+the orchestrator and of `progress()` above (which only reports to the
+orchestrator and is never shown to the user). Call any of these, all of them,
+or none, as the capability needs:
+
+| Method                                                                                | What it does                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `update_user_panel(panel_json=None, objects=None, selected_instance_id=None) -> bool` | Pushes panel content to the UI. Non-blocking: opens a `RequestUserInput` goal lazily on first call (or again once the previous one has ended), or refreshes the open one. Each argument left `None` means "leave unchanged"; at least one of `panel_json`/`objects` is required the first time it's called in a run |
+| `poll_ui_event() -> dict \| None`                                                     | Non-blocking: returns (and consumes) the most recent event since the last call -- `{"type": "button", "button_id": ...}` or `{"type": "object_tapped", "instance_id": ...}` -- or `None` if nothing new. A button event ends the panel's goal; the next `update_user_panel()` call transparently opens a fresh one  |
+| `publish_overlay_image(image) -> bool`                                                | Publishes one frame (a `sensor_msgs/Image`, e.g. from a wrist camera) of this capability's own camera to the UI bridge's shared overlay topic, stamped with this run's session token                                                                                                                                |
+
+All three return `False` (a no-op, logged) if this run holds no session token
+(e.g. standalone with no orchestrator) or the bridge is unreachable/rejects the
+request.
+
 ### `self.arm` (`ArmInterface`)
 
 Use `self.arm` only inside `execute()`. Anywhere else, a call raises
