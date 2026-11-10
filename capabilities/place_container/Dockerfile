@@ -10,10 +10,11 @@
 # torch/torchvision from your requirements (the base ships the Jetson wheels).
 # arm64 only.
 #
-# nightly-20261027 is the base the nightly arm driver is built on (interfaces
-# 672a329f9036), so self.arm speaks the driver's exact messages. It carries the
-# arm, common and orchestrator interfaces; rammp_curobo_interfaces it does not.
-FROM ghcr.io/rammp-org/rammp-base:nightly-20261027
+# nightly-20261030 is the base the nightly arm driver is built on (interfaces
+# 73e7ed1716bf, which has GoToEEPoses / GoToJointConfigs), so self.arm speaks
+# the driver's exact messages. It carries the arm, common and orchestrator
+# interfaces; rammp_curobo_interfaces it does not.
+FROM ghcr.io/rammp-org/rammp-base:nightly-20261030
 
 WORKDIR /module_ws
 
