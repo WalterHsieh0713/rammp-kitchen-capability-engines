@@ -13,7 +13,8 @@ Actions:
            The arm is left in impedance, held where the retreat ended.
   retreat  only step 6 (after a place stopped with the gripper open).
   reset    back to the start position (where the last place started, or `save`d): straight up,
-           then a joint move; gripper closed.
+           then to the start's joints, one cuRobo motion (go_to_joint_configs, around the chair's
+           collision volumes); gripper closed.
 
 SAFETY: the arm moves only if the node runs with `allow_execute:=true` AND the goal sets `execute`.
 Otherwise every goal is a dry run that plans and checks and returns the plan. Someone stands at the
@@ -30,8 +31,9 @@ from pathlib import Path
 
 import numpy as np
 import rammp_arm
-from capability_engine import Action, CapabilityEngine, EngineError, run
-from capability_engine.arm import HOLD_LEVEL
+from capability_engine import Action, ArmError, CapabilityEngine, EngineError, run
+from capability_engine.arm import HOLD_LEVEL, JointTarget
+from rammp_arm import _unwrap_from
 from scipy.spatial.transform import Rotation
 
 from . import lower, plan
@@ -73,8 +75,18 @@ PARAMS = {
     "adjust_speed_scale": 1.0,
     # the retreat's peak speed (m/s; was 0.03)
     "retreat_speed": 0.06,
-    # speed_scale of reset's joint moves (move_joints; was ~0.5)
+    # speed_scale of reset's joint moves with reset_mode legacy (move_joints; was ~0.5)
     "reset_speed_scale": 1.0,
+    # reset: "curobo" = one go_to_joint_configs motion (up, then the start), planned around the chair's
+    # collision volumes, at go_to_speed_scale; "legacy" = the impedance move_joints moves (no chair check)
+    "reset_mode": "curobo",
+    # blend_radius (m) where a blended motion passes a waypoint near the table or the container (the
+    # table is not in cuRobo's world), and up at the carrying height
+    "blend_radius_near": 0.03,
+    "blend_radius_far": 0.05,
+    # before lowering, ask cuRobo whether the ends of the moves it doesn't plan (the line down, the
+    # retreat) are clear of the chair's collision volumes
+    "curobo_check": True,
     # spot distance from the arm base axis (m) where the whole place plans with the full descent
     # (flatbot, table z 0.198: test_place_bowl.py --sweep, 2026-10-29). Arm kinematics only: the sweep
     # had no chair collision volumes, so re-measure it with the planner's. Outside it the plan decides
@@ -206,6 +218,7 @@ class Capability(CapabilityEngine):
         steps = self._describe(model, moves, descent, table_z, log)
         log(f"adjust turns the hand {info['adjust_deg']:.1f} deg; no obstacle check -- keep the spot clear")
         if not execute:
+            self._check_contact_zone(model, descent, table_z, log)
             log("DRY RUN -- all checks passed, nothing commanded")
             return {"executed": False, "plan": steps}
 
@@ -245,6 +258,8 @@ class Capability(CapabilityEngine):
                 f"STOPPED above the spot: {plan.reach_refusal(descent, table_z, spot)} in the posture cuRobo "
                 "chose -- nothing let go"
             )
+
+        self._check_contact_zone(model, descent, table_z, log)
 
         rec, cfg = lower.Recorder(), {**self.cfg, "table_z": table_z, "bowl_depth": plan.BOWL_DEPTH}
         try:
@@ -290,7 +305,23 @@ class Capability(CapabilityEngine):
         if not execute:
             return {"executed": False, "plan": steps}
         self._ready()
-        lower.joint_moves(self.arm, model, moves, self.cfg, log)
+        if self.cfg["reset_mode"] == "legacy":
+            lower.joint_moves(self.arm, model, moves, self.cfg, log)
+        else:
+            # After a place the arm holds in impedance a few cm off its setpoint: leave it on the
+            # current joints first. Joint targets on the measured joints' branch (J1/J3/J5/J7 spin
+            # freely: a wrapped target could send one the long way round).
+            lower.exit_impedance(self.arm, log)
+            qs = _unwrap_from(self.arm.raw_joints(), [q for _, q in moves])
+            radii = plan.reset_radii(model, self._joints(), moves, self.cfg["blend_radius_near"])
+            targets = [
+                JointTarget(q, blend_radius=r, speed_scale=self.cfg["go_to_speed_scale"])
+                for q, r in zip(qs, radii, strict=True)
+            ]
+            names = " -> ".join(n for n, _ in moves)
+            log(f"-> reset: {names} (go_to_joint_configs, speed x{self.cfg['go_to_speed_scale']}, blend {radii})")
+            if not self.arm.go_to_joint_configs(targets, "reset"):
+                raise plan.Refused(f"STOPPED: reset did not complete ({self.arm.last_error})")
         self.arm.gripper(1.0)  # ready for the next run, up here clear of the container
         log("Back at the start position.")
         return {"executed": True, "plan": steps}
@@ -304,6 +335,21 @@ class Capability(CapabilityEngine):
         why = self.arm.not_ready()
         if why is not None:
             raise plan.Refused(why)
+
+    def _check_contact_zone(self, model, descent, table_z, log):
+        """cuRobo plans (nothing moves) to the ends of the line down and the retreat, which run on
+        move_joints and so are never checked against the chair's collision volumes otherwise."""
+        if not self.cfg["curobo_check"]:
+            log("curobo_check is off: the line down and the retreat are NOT checked against the chair")
+            return
+        for label, q_from, q_to in plan.contact_zone_checks(model, descent, table_z):
+            try:
+                res = self.arm.plan_to_joints(q_to, q_from)
+            except ArmError as e:
+                raise plan.Refused(f"cuRobo check of {label}: the planner did not answer ({e})") from e
+            if not res.success:
+                raise plan.Refused(f"cuRobo refuses {label}: {res.message}")
+            log(f"cuRobo check: {label} is clear of the chair's collision volumes")
 
     def _check_tool_frame(self, model, q, log):
         reported = np.asarray(self.arm.get_state()["ee_pos"][:3], dtype=float)

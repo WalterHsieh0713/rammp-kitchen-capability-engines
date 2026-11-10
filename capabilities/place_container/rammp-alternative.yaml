@@ -57,6 +57,17 @@ params:
   reset_speed_scale: 1.0
   # and the retreat's peak speed (m/s).
   retreat_speed: 0.06
+  # reset: curobo = one go_to_joint_configs motion (up, then the start) around the chair's collision
+  # volumes, at go_to_speed_scale; legacy = the impedance move_joints moves (no chair check).
+  reset_mode: curobo
+  # blend_radius (m) where a blended motion passes a waypoint near the table or the container (the
+  # table is not in cuRobo's world) ...
+  blend_radius_near: 0.03
+  # ... and up at the carrying height.
+  blend_radius_far: 0.05
+  # Before lowering (and in a dry run), ask cuRobo whether the ends of the line down and the retreat,
+  # which it doesn't plan, are clear of the chair's collision volumes.
+  curobo_check: true
   # Spot distance from the arm base axis (m) with the full descent (flatbot, table z 0.198). Arm
   # kinematics, measured without the chair volumes: re-measure. Outside it the plan decides.
   reach: [0.70, 1.10]

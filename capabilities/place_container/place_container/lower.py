@@ -15,6 +15,11 @@ go, the retreat, and leaving impedance. Ported from RAMMP-table's kinova_arm.py 
    the first thing to look at in the recording (z right after "contact").
 3. hold `hold_press` below the contact point on the planned line, while the gripper opens.
 4. retreat straight back, move_joints in impedance.
+Steps 2 and 4 stay on self.arm.move_joints (the legacy API), not the driver's go_to_*: the line down
+needs move_joints' `monitor` to stop on contact, and both are short straight lines at the table, in
+impedance, with the fingers on the container -- cuRobo neither keeps a path straight nor knows the
+table or the container (its world is the chair's volumes only). Their ends are checked against the
+chair's volumes with a cuRobo plan first (node.py, plan.contact_zone_checks).
 One set of impedance gains (`gains`) for all of it, so the stiffness never changes mid-place. Any
 ending before contact leaves impedance with the position setpoint ON the current joints
 (exit_impedance), so a failed run never leaves the arm compliant in mid-air.
@@ -251,8 +256,9 @@ def back_out(arm, model, q_start, cfg, rec, log, release=0.0):
 
 
 def joint_moves(arm, model, moves, cfg, log, tol_deg=3.0):
-    """Each (name, q) as its own impedance joint move (reset), at `reset_speed_scale` of self.arm's
-    joint speed, checked to end within tol_deg."""
+    """Each (name, q) as its own impedance joint move (reset with reset_mode legacy: no collision
+    check against the chair), at `reset_speed_scale` of self.arm's joint speed, checked to end
+    within tol_deg."""
     for name, q in moves:
         T = model.fk(q)
         log(f"-> {name}: hand to x={T[0, 3]:.3f} y={T[1, 3]:.3f} z={T[2, 3]:.3f} (impedance)")

@@ -434,6 +434,39 @@ def reset_moves(model, q_now, q_start, empty=False):
     return moves + [("start", np.asarray(q_start, dtype=float))]
 
 
+def reset_radii(model, q_now, moves, near):
+    """blend_radius (m) of each of reset_moves' joint targets for go_to_joint_configs. Waypoints on
+    the straight way up are on one line, so passing them is free. The turn toward the start (the
+    last waypoint up) is cut only when the hand has risen far enough by then that the cut can't drag
+    the open fingers across the container: at least BOWL_DEPTH + near. The start itself stops."""
+    if not moves:
+        return []
+    radii = [near] * (len(moves) - 1) + [0.0]
+    ups = [i for i, (name, _) in enumerate(moves) if name.startswith("up")]
+    if ups:
+        rise = model.fk(moves[ups[-1]][1])[2, 3] - model.fk(q_now)[2, 3]
+        radii[ups[-1]] = near if rise >= BOWL_DEPTH + near else 0.0
+    return radii
+
+
+def contact_zone_checks(model, descent, table_z):
+    """The joint moves of a place that don't go through cuRobo (self.arm.move_joints: the line down
+    and the retreat), as (label, q_from, q_to) for a cuRobo plan_to_joints check of their ends
+    against the chair's collision volumes: the top of the line to its bottom, and where the
+    container should meet the table to the end of the retreat from there. A retreat that can't be
+    planned from there is left out (the real one starts at the contact and is planned again)."""
+    zs, qs = descent
+    checks = [("the bottom of the line down", qs[0], qs[-1])]
+    q_meet = hold_point(qs, zs, table_z + BOWL_DEPTH)
+    q_meet = np.asarray(qs[-1] if q_meet is None else q_meet, dtype=float)
+    try:
+        retreat = plan_retreat(model, q_meet)
+    except Refused:
+        return checks
+    checks.append(("the end of the retreat", q_meet, retreat[-1]))
+    return checks
+
+
 def hold_point(line_q, line_z, z_cmd):
     """The joints on the planned line down (joint waypoints line_q at flange heights line_z,
     falling) where the flange is at z_cmd: interpolated between neighbouring waypoints (a few mm

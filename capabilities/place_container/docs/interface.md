@@ -91,7 +91,11 @@ passes them as a params file. The defaults are the flatbot's (2026-10-26).
 | `go_to_speed_scale`      | `0.4`                                        | speed_scale of the carrying moves (2x RAMMP-table's)                                                               |
 | `adjust_speed_scale`     | `1.0`                                        | speed_scale of the squaring turn (2x)                                                                              |
 | `retreat_speed`          | `0.06`                                       | The retreat's peak speed (m/s; 2x)                                                                                 |
-| `reset_speed_scale`      | `1.0`                                        | speed_scale of reset's joint moves (2x)                                                                            |
+| `reset_speed_scale`      | `1.0`                                        | speed_scale of reset's joint moves with `reset_mode` legacy (2x)                                                   |
+| `reset_mode`             | `"curobo"`                                   | `curobo`: reset is one cuRobo motion around the chair; `legacy`: the old impedance joint moves                     |
+| `blend_radius_near`      | `0.03`                                       | blend_radius near the table or the container, which cuRobo doesn't know (m)                                        |
+| `blend_radius_far`       | `0.05`                                       | blend_radius at the carrying height (m)                                                                            |
+| `curobo_check`           | `true`                                       | cuRobo checks the ends of the line down and the retreat against the chair's volumes first                          |
 | `reach`                  | `[0.7, 1.1]`                                 | Spot distance from the arm base axis with the full descent (m); kinematics only, re-measure with the chair volumes |
 | `allow_reconfigure`      | `false`                                      | Switch to another arm posture where the line down can't reach the table in this one                                |
 | `max_adjust_deg`         | `15.0`                                       | Largest squaring turn (deg)                                                                                        |

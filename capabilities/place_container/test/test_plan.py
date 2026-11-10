@@ -113,6 +113,26 @@ def test_contact_counts_only_while_the_command_is_moving():
     assert min(open_) < 0.2 and max(open_) > 0.8  # the table may be ~15 cm higher or ~3 cm lower than marked
 
 
+class HeightModel:
+    """A stand-in model whose tool z is joint 1 (m): enough for the blend radii."""
+
+    def fk(self, q, link="tool"):
+        T = np.eye(4)
+        T[2, 3] = float(q[0])
+        return T
+
+
+def test_reset_cuts_the_turn_only_once_the_fingers_are_clear_of_the_container():
+    m, q_now = HeightModel(), np.zeros(7)
+    high = [("up", np.full(7, 0.20)), ("start", np.full(7, 0.25))]  # risen 20 cm: clear
+    assert plan.reset_radii(m, q_now, high, 0.03) == [0.03, 0.0]
+    low = [("up", np.full(7, 0.06)), ("start", np.full(7, 0.06))]  # 6 cm: fingers still at the lip
+    assert plan.reset_radii(m, q_now, low, 0.03) == [0.0, 0.0]
+    split = [("up'", np.full(7, 0.05)), ("up", np.full(7, 0.20)), ("start", np.full(7, 0.2))]
+    assert plan.reset_radii(m, q_now, split, 0.03) == [0.03, 0.03, 0.0]  # on the line up: free
+    assert plan.reset_radii(m, q_now, [("start", np.ones(7))], 0.03) == [0.0]
+
+
 # -- on the flatbot model ---------------------------------------------------------------------
 
 
@@ -177,3 +197,15 @@ def test_retreat_takes_a_shorter_line_past_the_lip_and_refuses_less(model, monke
             with pytest.raises(plan.Refused, match="can't go straight back"):
                 plan.plan_retreat(model, q_start)
     monkeypatch.setattr(model, "ik", ik)
+
+
+@needs_model
+def test_the_contact_moves_are_checked_at_their_ends(model):
+    q_start = holding_pose(model, SPOT)
+    _, descent, _ = plan.plan_place(model, q_start, SPOT, TABLE_Z)
+    checks = plan.contact_zone_checks(model, descent, TABLE_Z)
+    assert [c[0] for c in checks] == ["the bottom of the line down", "the end of the retreat"]
+    np.testing.assert_allclose(checks[0][1], descent[1][0])
+    np.testing.assert_allclose(checks[0][2], descent[1][-1])
+    meet = model.fk(checks[1][1])[2, 3]
+    assert meet == pytest.approx(TABLE_Z + plan.BOWL_DEPTH, abs=plan.PATH_STEP)
