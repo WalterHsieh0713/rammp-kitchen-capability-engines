@@ -9,10 +9,12 @@
 
 ## What it does
 
-The reference capability. It offers one action, `count`, which counts up to
-`to` with progress feedback and honours pause and cancel. It is activated when
-the user selects a `counter`. Replace this paragraph with what your capability
-does and what would break without it.
+The reference capability. It offers two actions: `count`, which counts up to
+`to` with progress feedback and honours pause and cancel, and
+`count_with_panel`, the same but also driving a live progress panel (with a
+Stop button) directly on the UI bridge. It is activated when the user selects
+a `counter`. Replace this paragraph with what your capability does and what
+would break without it.
 
 ## Publishes
 
@@ -37,9 +39,10 @@ Served under `/example/`, types from `rammp_orchestrator_interfaces`:
 | `/example/control`        | `srv/Control`          | Pause, resume, cancel the running action      |
 | `/example/hibernate`      | `srv/Hibernate`        | Drop the selection                            |
 
-| Action  | Params                                                | Result payload      |
-| ------- | ----------------------------------------------------- | ------------------- |
-| `count` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}` |
+| Action             | Params                                                | Result payload                                |
+| ------------------ | ----------------------------------------------------- | --------------------------------------------- |
+| `count`            | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n}`                           |
+| `count_with_panel` | `to` (int ≥ 1, default 3), `interval_s` (default 1.0) | `{"counted_to": n, "stopped_by_user"?: true}` |
 
 Registers with `/rammp_orchestrator/register_engine` on startup, retrying until
 the orchestrator is up.
@@ -50,10 +53,11 @@ ROS parameters, declared with defaults under `params:` in the real fragment. A
 deployment sets one per robot with an `overrides:` entry in its profile; sheppy
 passes them as a params file.
 
-| Name               | Default | Meaning                                                   |
-| ------------------ | ------- | --------------------------------------------------------- |
-| `use_orchestrator` | `true`  | `false` runs standalone: no registration, drive it by CLI |
-| `mock`             | `false` | `true` skips hardware (the mock alternative sets it)      |
+| Name                  | Default            | Meaning                                                                                                                           |
+| --------------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `use_orchestrator`    | `true`             | `false` runs standalone: no registration, drive it by CLI                                                                         |
+| `mock`                | `false`            | `true` skips hardware (the mock alternative sets it)                                                                              |
+| `ui_bridge_node_name` | `"ui_bridge_node"` | Node name of the `rammp_ui_bridge` instance `ctx.update_user_panel()`/`ctx.poll_ui_event()`/`ctx.publish_overlay_image()` talk to |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
 afterwards. They are set per robot like any other; `arm.mock_urdf` names the

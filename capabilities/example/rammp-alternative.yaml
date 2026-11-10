@@ -78,5 +78,9 @@ params:
   "arm.close_stream_wait_s": 1.0
   "arm.mock_joints": [0.0, 0.26, 3.14, -2.27, 0.0, 0.96, 1.57]
   "arm.mock_urdf": ""
+  # Direct engine<->UI-bridge wiring (see docs/interface.md's Parameters
+  # section); a deployment using a differently named bridge node overrides
+  # this rather than editing the manifest.
+  "ui_bridge_node_name": "ui_bridge_node"
 publishes: [/example/status]
 subscribes: []
