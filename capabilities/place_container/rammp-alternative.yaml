@@ -50,7 +50,7 @@ params:
   impedance_torque_limit: [39.0, 39.0, 39.0, 39.0, 9.0, 9.0, 9.0]
   # Speeds. The hand's speed where the table should be (m/s): what the contact test was tuned at.
   lower_speed: 0.02
-  # The rest is 2x RAMMP-table's: speed_scale of the carrying moves (go_to_ee_pose),
+  # The rest is 2x RAMMP-table's: speed_scale of the carrying moves (go_to_ee_poses; and reset's),
   go_to_speed_scale: 0.4
   # of the squaring turn and of reset's joint moves (move_joints),
   adjust_speed_scale: 1.0
@@ -68,6 +68,13 @@ params:
   # Before lowering (and in a dry run), ask cuRobo whether the ends of the line down and the retreat,
   # which it doesn't plan, are clear of the chair's collision volumes.
   curobo_check: true
+  # adjust -> lift -> transit as ONE go_to_ee_poses motion (cuRobo, blended at the waypoints, at
+  # go_to_speed_scale); false = separate moves as on 2026-10-29 (adjust on move_joints).
+  blend: true
+  # With blend: pose = the squaring turn is the motion's first target (unheld); joints = a
+  # go_to_joint_config to our checked joints first (if cuRobo swings the hand for the pose), then
+  # lift -> transit.
+  adjust_mode: pose
   # Spot distance from the arm base axis (m) with the full descent (flatbot, table z 0.198). Arm
   # kinematics, measured without the chair volumes: re-measure. Outside it the plan decides.
   reach: [0.70, 1.10]

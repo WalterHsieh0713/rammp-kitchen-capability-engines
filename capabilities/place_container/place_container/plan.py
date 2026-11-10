@@ -341,6 +341,10 @@ def plan_place(
         )
     spot = np.asarray(spot, dtype=float)
     moves = plan_segment(model, q_now, T_now[:3, 3], adjust_quat, table_z, "adjust")
+    # The targets of the carrying motion as one go_to_ee_poses would take them. The adjust changes the
+    # hand's tilt, so it can't be held; lift keeps adjust's quat exactly (a held target must keep the
+    # previous target's orientation); transit keeps the level hold with a new heading.
+    waypoints = [dict(name="adjust", pos=T_now[:3, 3].copy(), quat=adjust_quat, hold="none", q=moves[-1][1])]
     approach = approach_direction(spot)
     quat = hand_orientation(approach, left, model.pitch)
     safe_z = table_z + SAFE_HEIGHT
@@ -348,6 +352,7 @@ def plan_place(
         lift = T_now[:3, 3].copy()
         lift[2] = safe_z
         moves += plan_segment(model, moves[-1][1], lift, adjust_quat, table_z, "lift")
+        waypoints.append(dict(name="lift", pos=lift, quat=adjust_quat, hold="level", q=moves[-1][1]))
     above = tool_above_spot(spot, table_z, SAFE_HEIGHT, model.reach)
     q_from = moves[-1][1]
     transit = plan_segment(model, q_from, above, quat, table_z, "transit")
@@ -375,6 +380,10 @@ def plan_place(
             raise Refused("transit to the other posture: " + "; ".join(problems))
         transit, reconfigure = [("transit-reconfigure", q_t)], True
     moves += transit
+    # joints: True = a joint target (go_to_joint_config to these exact joints), not a pose
+    waypoints.append(
+        dict(name=transit[-1][0], pos=above, quat=quat, hold="level", q=transit[-1][1], joints=reconfigure)
+    )
     info = dict(
         adjust_deg=adjust_deg,
         approach=approach,
@@ -382,8 +391,18 @@ def plan_place(
         floor_z=floor_z,
         camera_left=left,
         reconfigure=reconfigure,
+        waypoints=waypoints,
     )
     return moves, descent, info
+
+
+def blend_radii(waypoints, table_z, near, far):
+    """blend_radius (m) for each waypoint of one blended motion: `far` where the tool passes at the
+    carrying height (SAFE_HEIGHT above the table, clear of it), `near` anywhere lower (the table and
+    the container are not in cuRobo's world, so a cut corner there is checked only against the
+    chair), 0 at the last one, which stops."""
+    radii = [far if w["pos"][2] >= table_z + SAFE_HEIGHT - 0.01 else near for w in waypoints]
+    return radii[:-1] + [0.0] if radii else []
 
 
 def plan_retreat(model, q_start, release=0.0, step=RETREAT_STEP, log=None):

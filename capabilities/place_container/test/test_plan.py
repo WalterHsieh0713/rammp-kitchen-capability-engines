@@ -133,6 +133,13 @@ def test_reset_cuts_the_turn_only_once_the_fingers_are_clear_of_the_container():
     assert plan.reset_radii(m, q_now, [("start", np.ones(7))], 0.03) == [0.0]
 
 
+def test_blend_radii_are_small_below_the_carrying_height_and_zero_at_the_end():
+    low, high = {"pos": [0.5, 0.0, TABLE_Z + 0.12]}, {"pos": [0.5, 0.0, TABLE_Z + plan.SAFE_HEIGHT]}
+    assert plan.blend_radii([low, high, high], TABLE_Z, 0.03, 0.05) == [0.03, 0.05, 0.0]
+    assert plan.blend_radii([high], TABLE_Z, 0.03, 0.05) == [0.0]
+    assert plan.blend_radii([], TABLE_Z, 0.03, 0.05) == []
+
+
 # -- on the flatbot model ---------------------------------------------------------------------
 
 
@@ -151,6 +158,15 @@ def test_a_spot_plan_goes_straight_down_in_arm_mount(model):
         assert np.linalg.norm(T[:2, 3] - top[:2, 3]) < plan.IK_TOL
         assert plan.bowl_tilt_deg(T[:3, :3], model.pitch) <= plan.MAX_LOWER_TILT_DEG
     assert zs[0] - zs[-1] <= plan.MAX_DROP + 1e-9
+    # the carrying motion's targets: adjust unheld, then each held target keeps the previous quat
+    # where its hold needs it (lift), and ends on the top of the line down
+    wps = info["waypoints"]
+    assert [w["name"] for w in wps][0] == "adjust" and wps[-1]["name"] == "transit"
+    assert wps[0]["hold"] == "none" and all(w["hold"] == "level" for w in wps[1:])
+    for a, b in zip(wps, wps[1:], strict=False):
+        if b["name"] == "lift":
+            np.testing.assert_allclose(b["quat"], a["quat"])
+    np.testing.assert_allclose(wps[-1]["pos"], top[:3, 3], atol=plan.IK_TOL)
 
 
 @needs_model

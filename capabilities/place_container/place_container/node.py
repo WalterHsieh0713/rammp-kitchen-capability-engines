@@ -7,8 +7,10 @@ Actions:
   mark     the closed fingertips touching the target -> saved as the spot (its z = the table). No motion.
   place    the container, gripped by its lip, to the spot ({x, y, table_z}, or the marked one):
              1. adjust: square the hand in place to the nearest hold (level, pointing `pitch_deg` down);
-             2. lift to SAFE_HEIGHT above the table, if lower; 3. transit to above the spot
-             (go_to_ee_pose, HOLD_LEVEL); 4. the straight line down in the driver's IMPEDANCE mode
+             2. lift to SAFE_HEIGHT above the table, if lower; 3. transit to above the spot (HOLD_LEVEL)
+             -- 1-3 are ONE go_to_ee_poses motion (cuRobo, around the chair's collision volumes,
+             blended at the waypoints; `blend` false: separate moves as before);
+             4. the straight line down in the driver's IMPEDANCE mode
              until contact, then hold `hold_press` below it (lower.py); 5. open; 6. straight back.
            The arm is left in impedance, held where the retreat ended.
   retreat  only step 6 (after a place stopped with the gripper open).
@@ -32,7 +34,7 @@ from pathlib import Path
 import numpy as np
 import rammp_arm
 from capability_engine import Action, ArmError, CapabilityEngine, EngineError, run
-from capability_engine.arm import HOLD_LEVEL, JointTarget
+from capability_engine.arm import HOLD_LEVEL, HOLD_NONE, JointTarget, PoseTarget
 from rammp_arm import _unwrap_from
 from scipy.spatial.transform import Rotation
 
@@ -71,8 +73,15 @@ PARAMS = {
     "lower_speed": 0.02,
     # speed_scale of the carrying moves (go_to_ee_pose; was 0.2)
     "go_to_speed_scale": 0.4,
-    # speed_scale of the squaring turn (move_joints; was 0.5)
+    # speed_scale of the squaring turn with blend false (move_joints; was 0.5)
     "adjust_speed_scale": 1.0,
+    # adjust -> lift -> transit as ONE go_to_ee_poses motion (cuRobo, blended at the waypoints, all at
+    # go_to_speed_scale); false = separate moves as on 2026-10-29 (adjust on move_joints)
+    "blend": True,
+    # with blend: "pose" = the squaring turn is the motion's first target (unheld: it changes the tilt);
+    # "joints" = a go_to_joint_config to our checked joints first (if cuRobo swings the hand for the
+    # pose, as it did 2026-10-08), then lift -> transit blended
+    "adjust_mode": "pose",
     # the retreat's peak speed (m/s; was 0.03)
     "retreat_speed": 0.06,
     # speed_scale of reset's joint moves with reset_mode legacy (move_joints; was ~0.5)
@@ -216,7 +225,10 @@ class Capability(CapabilityEngine):
                 "tilt is checked only along a straight joint path -- watch it"
             )
         steps = self._describe(model, moves, descent, table_z, log)
-        log(f"adjust turns the hand {info['adjust_deg']:.1f} deg; no obstacle check -- keep the spot clear")
+        log(
+            f"adjust turns the hand {info['adjust_deg']:.1f} deg. cuRobo avoids the chair's collision volumes; the "
+            "table and what is on it are NOT in its world -- keep the way to the spot clear"
+        )
         if not execute:
             self._check_contact_zone(model, descent, table_z, log)
             log("DRY RUN -- all checks passed, nothing commanded")
@@ -224,28 +236,10 @@ class Capability(CapabilityEngine):
 
         self._ready()
         self._save("start.json", dict(q=[float(v) for v in q_now], time=time.time()))
-        for name, q in moves:
-            ctx.progress(name, 0.0)
-            if name.startswith("adjust"):
-                # a small turn in place: our checked joint move (cuRobo swung the hand sideways and back
-                # for it, 2026-10-08)
-                ok = self.arm.move_joints([q], speed_scale=self.cfg["adjust_speed_scale"])
-            elif name == "transit-reconfigure":
-                # to these exact joints: the posture whose line down reaches the table
-                log(f"-> {name} (go_to_joint_config, speed x{self.cfg['go_to_speed_scale']})")
-                ok = self.arm.go_to_joint_config(q, name, speed_scale=self.cfg["go_to_speed_scale"])
-            else:
-                T = model.fk(q)
-                log(f"-> {name} (go_to_ee_pose, level, speed x{self.cfg['go_to_speed_scale']})")
-                ok = self.arm.go_to_ee_pose(
-                    T[:3, 3],
-                    Rotation.from_matrix(T[:3, :3]).as_quat(),
-                    name,
-                    speed_scale=self.cfg["go_to_speed_scale"],
-                    orientation_hold=HOLD_LEVEL,
-                )
-            if not ok:
-                raise plan.Refused(f"STOPPED: {name} did not complete ({self.arm.last_error})")
+        if self.cfg["blend"]:
+            self._carry(info["waypoints"], table_z, ctx, log)
+        else:
+            self._carry_separately(model, moves, ctx, log)
         q_top = self._joints()
         tilt = model.tilt(q_top)
         if tilt > 1.0:
@@ -335,6 +329,73 @@ class Capability(CapabilityEngine):
         why = self.arm.not_ready()
         if why is not None:
             raise plan.Refused(why)
+
+    def _carry(self, waypoints, table_z, ctx, log):
+        """adjust -> lift -> transit as ONE go_to_ee_poses motion: cuRobo plans every leg around the
+        chair's collision volumes and blends them, so the arm doesn't stop at the waypoints."""
+        speed = self.cfg["go_to_speed_scale"]
+        poses = [w for w in waypoints if not w.get("joints")]
+        if self.cfg["adjust_mode"] == "joints":
+            # the squaring turn to our own checked joints first (a joint-space plan: no swing), then
+            # the rest from there
+            w = poses.pop(0)
+            ctx.progress("adjust", 0.0)
+            (q,) = _unwrap_from(self.arm.raw_joints(), [w["q"]])
+            log(f"-> adjust (go_to_joint_config, speed x{speed})")
+            if not self.arm.go_to_joint_config(q, "adjust", speed_scale=speed):
+                raise plan.Refused(f"STOPPED: adjust did not complete ({self.arm.last_error})")
+        if poses:
+            radii = plan.blend_radii(poses, table_z, self.cfg["blend_radius_near"], self.cfg["blend_radius_far"])
+            targets = [
+                PoseTarget(
+                    w["pos"],
+                    w["quat"],
+                    hold=HOLD_LEVEL if w["hold"] == "level" else HOLD_NONE,
+                    blend_radius=r,
+                    speed_scale=speed,
+                )
+                for w, r in zip(poses, radii, strict=True)
+            ]
+            names = [w["name"] for w in poses]
+            label = " -> ".join(names)
+            ctx.progress(names[0] if len(names) == 1 else "carry", 0.0)
+            log(f"-> {label} (go_to_ee_poses, one motion, speed x{speed}, blend {radii} m)")
+            if not self.arm.go_to_ee_poses(targets, label):
+                raise plan.Refused(f"STOPPED: {label} did not complete ({self.arm.last_error})")
+        for w in waypoints:
+            if w.get("joints"):  # transit-reconfigure: to these exact joints, the posture that reaches
+                ctx.progress(w["name"], 0.0)
+                (q,) = _unwrap_from(self.arm.raw_joints(), [w["q"]])
+                log(f"-> {w['name']} (go_to_joint_config, speed x{speed})")
+                if not self.arm.go_to_joint_config(q, w["name"], speed_scale=speed):
+                    raise plan.Refused(f"STOPPED: {w['name']} did not complete ({self.arm.last_error})")
+
+    def _carry_separately(self, model, moves, ctx, log):
+        """blend false: each move on its own, as on 2026-10-29 (adjust on move_joints, the rest
+        go_to_ee_pose level)."""
+        for name, q in moves:
+            ctx.progress(name, 0.0)
+            if name.startswith("adjust"):
+                # a small turn in place: our checked joint move (cuRobo swung the hand sideways and back
+                # for it, 2026-10-08)
+                ok = self.arm.move_joints([q], speed_scale=self.cfg["adjust_speed_scale"])
+            elif name == "transit-reconfigure":
+                # to these exact joints: the posture whose line down reaches the table
+                log(f"-> {name} (go_to_joint_config, speed x{self.cfg['go_to_speed_scale']})")
+                (q,) = _unwrap_from(self.arm.raw_joints(), [q])
+                ok = self.arm.go_to_joint_config(q, name, speed_scale=self.cfg["go_to_speed_scale"])
+            else:
+                T = model.fk(q)
+                log(f"-> {name} (go_to_ee_pose, level, speed x{self.cfg['go_to_speed_scale']})")
+                ok = self.arm.go_to_ee_pose(
+                    T[:3, 3],
+                    Rotation.from_matrix(T[:3, :3]).as_quat(),
+                    name,
+                    speed_scale=self.cfg["go_to_speed_scale"],
+                    orientation_hold=HOLD_LEVEL,
+                )
+            if not ok:
+                raise plan.Refused(f"STOPPED: {name} did not complete ({self.arm.last_error})")
 
     def _check_contact_zone(self, model, descent, table_z, log):
         """cuRobo plans (nothing moves) to the ends of the line down and the retreat, which run on
