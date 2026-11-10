@@ -135,6 +135,11 @@ class _Run:
         self.ui_lock = threading.Lock()
         self.ui_goal_handle = None
         self.ui_pending_event: dict | None = None
+        # Set by _ui_close() once execute() has ended. A RequestUserInput goal
+        # accepted after that point (e.g. its send was in flight when the run
+        # ended) must be cancelled immediately on arrival instead of being
+        # left dangling against a token this engine no longer holds.
+        self.ui_closed = False
 
 
 class Context:
@@ -173,12 +178,17 @@ class Context:
         again if the previous one just ended -- any button press ends it, see
         poll_ui_event() below) or refreshes the open one via
         UpdateUserInputPanel, then returns immediately without waiting for the
-        user to do anything. Use poll_ui_event() to read back button presses and
-        object taps as they happen.
+        user to do anything, or for the bridge's service/action server to be
+        ready or respond -- readiness is checked immediately (never waited
+        for) and the request/response itself is tracked through callbacks, not
+        a blocking wait in this thread. Use poll_ui_event() to read back
+        button presses and object taps as they happen.
 
         Returns False (no-op, logged) if this run holds no session token (e.g.
-        standalone with no orchestrator) or the bridge is unreachable/rejects
-        the request."""
+        standalone with no orchestrator) or the bridge's client/server isn't
+        immediately ready. A True return means the request was dispatched, not
+        that the bridge has necessarily accepted it yet -- a refusal is
+        resolved transparently in the background (see _ui_update_panel)."""
         return self._engine._ui_update_panel(
             self, panel_json=panel_json, objects=objects, selected_instance_id=selected_instance_id
         )
@@ -505,6 +515,11 @@ class CapabilityEngine(Node):
         return bool(response and response.success)
 
     # -- UI-bridge plumbing (Context.update_user_panel/poll_ui_event/publish_overlay_image) --
+    #
+    # Everything here is genuinely non-blocking, matching ctx.update_user_panel()'s
+    # docstring: readiness is checked immediately (never waited for), and every
+    # send's outcome (accept/refusal, result) is handled by a done-callback
+    # rather than a blocking wait in the caller's (execute()'s) thread.
 
     def _ui_update_panel(
         self,
@@ -530,7 +545,7 @@ class CapabilityEngine(Node):
         with run.ui_lock:
             goal_handle = run.ui_goal_handle
         if goal_handle is not None:
-            if not wait_until(self._ui_update_client.service_is_ready, CALL_TIMEOUT_S, ctx):
+            if not self._ui_update_client.service_is_ready():
                 self.get_logger().warning(
                     "ui_bridge_node's ~/request_user_input/update unavailable"
                 )
@@ -540,31 +555,42 @@ class CapabilityEngine(Node):
                     token=list(token), request_json=json.dumps(request_payload)
                 )
             )
-            if not wait_until(future.done, CALL_TIMEOUT_S, ctx):
-                self.get_logger().warning("ui_bridge_node's ~/request_user_input/update timed out")
-                return False
-            response = future.result()
-            if response.accepted:
-                return True
-            # Most likely the goal just ended (a button press, or the bridge
-            # force-aborted it) since we last checked -- fall through to open a
-            # fresh one below, same as if this were the first call.
-            self.get_logger().info(
-                f"update_user_panel update refused, reopening: {response.message}"
+            future.add_done_callback(
+                lambda f: self._ui_on_update_response(run, token, request_payload, f)
             )
-            with run.ui_lock:
-                run.ui_goal_handle = None
+            return True
 
         if "panel_json" not in request_payload and "objects" not in request_payload:
             self.get_logger().warning(
                 "update_user_panel: need panel_json or objects to open a new goal"
             )
             return False
-        return self._ui_open_goal(ctx, request_payload, token)
+        return self._ui_open_goal(run, request_payload, token)
 
-    def _ui_open_goal(self, ctx: Context, request_payload: dict, token: bytes) -> bool:
-        run = ctx._run
-        if not wait_until(self._ui_request_client.server_is_ready, CALL_TIMEOUT_S, ctx):
+    def _ui_on_update_response(
+        self, run: "_Run", token: bytes, request_payload: dict, future
+    ) -> None:
+        """Done-callback for the UpdateUserInputPanel call `_ui_update_panel`
+        fires without waiting for. Reopens a fresh goal in the background if
+        the update was refused -- most likely the previous goal just ended (a
+        button press, or the bridge force-aborted it) since we last checked --
+        same as if this were the first call."""
+        try:
+            response = future.result()
+        except Exception as error:
+            self.get_logger().warning(
+                f"ui_bridge_node's ~/request_user_input/update failed: {error!r}"
+            )
+            return
+        if response.accepted:
+            return
+        self.get_logger().info(f"update_user_panel update refused, reopening: {response.message}")
+        with run.ui_lock:
+            run.ui_goal_handle = None
+        self._ui_open_goal(run, request_payload, token)
+
+    def _ui_open_goal(self, run: "_Run", request_payload: dict, token: bytes) -> bool:
+        if not self._ui_request_client.server_is_ready():
             self.get_logger().warning("ui_bridge_node's ~/request_user_input server unavailable")
             return False
         goal = RequestUserInput.Goal(
@@ -573,19 +599,36 @@ class CapabilityEngine(Node):
         send_future = self._ui_request_client.send_goal_async(
             goal, feedback_callback=lambda feedback_msg: self._ui_on_feedback(run, feedback_msg)
         )
-        if not wait_until(send_future.done, CALL_TIMEOUT_S, ctx):
-            self.get_logger().warning("RequestUserInput goal send timed out")
-            return False
-        goal_handle = send_future.result()
+        # Always tracked via this callback, not a blocking wait on
+        # send_future -- so a goal accepted after a slow send is never
+        # abandoned/untracked, however long it actually takes.
+        send_future.add_done_callback(lambda f: self._ui_on_goal_response(run, f))
+        return True
+
+    def _ui_on_goal_response(self, run: "_Run", send_future) -> None:
+        try:
+            goal_handle = send_future.result()
+        except Exception as error:
+            self.get_logger().warning(f"RequestUserInput goal send failed: {error!r}")
+            return
         if goal_handle is None or not goal_handle.accepted:
             self.get_logger().warning("RequestUserInput goal rejected")
-            return False
+            return
         with run.ui_lock:
-            run.ui_goal_handle = goal_handle
+            if run.ui_closed:
+                # The run ended (_ui_close() already ran) while this goal's
+                # acceptance was still in flight -- don't leave it dangling
+                # against a token this engine no longer holds.
+                already_closed = True
+            else:
+                run.ui_goal_handle = goal_handle
+                already_closed = False
+        if already_closed:
+            goal_handle.cancel_goal_async()
+            return
         goal_handle.get_result_async().add_done_callback(
-            lambda result_future: self._ui_on_result(run, result_future)
+            lambda result_future: self._ui_on_result(run, goal_handle, result_future)
         )
-        return True
 
     def _ui_on_feedback(self, run: "_Run", feedback_msg) -> None:
         try:
@@ -599,19 +642,22 @@ class CapabilityEngine(Node):
                     "instance_id": payload.get("instance_id", ""),
                 }
 
-    def _ui_on_result(self, run: "_Run", result_future) -> None:
+    def _ui_on_result(self, run: "_Run", goal_handle, result_future) -> None:
         """A RequestUserInput goal always ends on a button press, an engine
         cancel, or a bridge-forced abort (see the .action file's own doc
         comment) -- there's no "button that keeps the goal open" concept.
-        Record the outcome and clear ui_goal_handle so the next
-        update_user_panel() call knows to open a fresh goal rather than try
-        (and fail) to refresh this now-dead one."""
+        Record the outcome, and clear ui_goal_handle only if it is still this
+        goal's handle: update_user_panel() may already have opened a newer
+        goal (e.g. after this one was refused) by the time this result
+        arrives, and must not have that replacement's handle wiped out from
+        under it."""
         try:
             payload = json.loads(result_future.result().result.result_json)
         except Exception as error:
             payload = {"status": "aborted", "reason": repr(error)}
         with run.ui_lock:
-            run.ui_goal_handle = None
+            if run.ui_goal_handle is goal_handle:
+                run.ui_goal_handle = None
             if payload.get("status") == "button":
                 run.ui_pending_event = {"type": "button", "button_id": payload.get("button_id", "")}
             elif payload.get("status") == "aborted":
@@ -636,11 +682,15 @@ class CapabilityEngine(Node):
 
     def _ui_close(self, run: "_Run") -> None:
         """Called once execute() ends: cancels any still-open panel goal rather
-        than leaving it dangling against a token this engine no longer holds."""
+        than leaving it dangling against a token this engine no longer holds.
+        Also marks the run closed, so a goal whose acceptance is still in
+        flight (see _ui_on_goal_response) is cancelled immediately on arrival
+        instead of being left dangling too."""
         with run.ui_lock:
             goal_handle = run.ui_goal_handle
             run.ui_goal_handle = None
             run.ui_pending_event = None
+            run.ui_closed = True
         if goal_handle is not None:
             goal_handle.cancel_goal_async()
 
