@@ -66,17 +66,20 @@ impedance, before it in position control.
 
 ## On the user's UI
 
-The UI offers this engine's actions when the user taps a **table** (`perception_classes`). Its tap
-runs `place_here`: the UI sends no params, so `place_here` places for real (the node must run with
-`allow_execute: true`) at the marked spot, and ends back at the start.
+The UI offers this engine when the user taps a **table** (`perception_classes`), with one action:
+**Place the container here** (`place_here`; `availability()` hides the others, which with the UI's
+empty params would only dry-run). It places for real (the node must run with `allow_execute: true`)
+at the marked spot, and ends back at the start. A refusal before anything moved shows the reason and
+the same button to try again; a stop after the arm moved shows the reason with OK only. Modelled on
+microwave's UI flow (feature/14-microwave-close), which ran with the UI on 2026-11-12.
 
 Every action puts a panel on the UI bridge (`ctx.update_user_panel`, PR #42): a title ("Placing the
 container", ...), the phase in words (checking the plan, carrying it over, lowering it onto the
 table, letting go, backing the hand away and going back to the start) and a progress bar.
 `place_here` ends with "The container is on the table" and a Done button. A failure is shown with
 its full reason (what happened, where, what to do next) and an OK button. The action waits for the
-tap (at most `ui_error_wait_s`; the panel is pushed again every second, as microwave_place does)
-before it ends, because the panel closes when the action ends. Standalone (no orchestrator, so no
+tap (at most `ui_error_wait_s`; the panel is pushed again only if the UI dropped it: re-sending an
+open one made it flash) before it ends, because the panel closes when the action ends. Standalone (no orchestrator, so no
 session token) there is no panel.
 
 In mock (`mock: true`), `place` and `place_here` walk through their phases on the panel, 1 s each,

@@ -53,3 +53,9 @@ def test_the_one_tap_place_ends_with_a_done_button_and_mock_walks_the_real_phase
     assert ui.is_button({"type": "button", "button_id": ui.DONE}, ui.DONE)
     assert ui.progress_panel("place_here", "return")["message"].startswith("Backing the hand away")
     assert ui.MOCK_PHASES[-1] == "return" and ui.title("place_here") == ui.title("place")
+
+
+def test_a_refusal_before_anything_moved_offers_the_same_button_again():
+    panel = ui.retry_panel("the marked spot is 31 min old -- mark it again")
+    assert panel["buttons"] == [{"button_id": ui.RETRY, "label": ui.PLACE_HERE}]
+    assert panel["message"].startswith("the marked spot is 31 min old") and ui.PLACE_HERE in panel["message"]

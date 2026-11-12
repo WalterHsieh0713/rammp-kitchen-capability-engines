@@ -197,6 +197,15 @@ RESET = {
 }
 
 
+def _panel_open(ctx):
+    """Whether the run's UI panel goal is still open (or opening): the engine's own run record (PR #42).
+    True when it can't tell, so nothing is re-sent needlessly. From microwave (feature/14)."""
+    run = getattr(ctx, "_run", None)
+    if run is None or not hasattr(run, "ui_goal_handle"):
+        return True
+    return bool(run.ui_goal_handle is not None or getattr(run, "ui_opening", False))
+
+
 class _PanelContext:
     """The action's ctx, with every progress() also put on the user's UI panel in words
     (ui.progress_panel). Everything else is ctx's own. `panel` False (standalone: no orchestrator,
@@ -226,7 +235,7 @@ class Capability(CapabilityEngine):
     required_resources = ["arm", "gripper"]
     actions = [
         # The UI's one tap (it sends no params): the place for real, at the marked spot, back to the start
-        Action("place_here", "Place the container here"),
+        Action("place_here", ui.PLACE_HERE),
         Action("place", "Place the container on the table", params_schema=PLACE),
         Action("mark", "Save the fingertip position as the spot", params_schema={"type": "object"}),
         Action("retreat", "Back the hand straight out", params_schema=EXECUTE),
@@ -254,21 +263,30 @@ class Capability(CapabilityEngine):
         ctx = _PanelContext(ctx, action_id, panel=self.orchestrated)
         first = {"place": "plan", "place_here": "plan", "reset": "reset", "retreat": "retreat"}
         first = first.get(action_id, action_id)
-        ctx.update_user_panel(panel_json=ui.progress_panel(action_id, first))
-        try:
-            with self._recording(action_id, params) as bag:
-                ctx.bag = bag
-                result = self._act(action_id, params, ctx)
-                if bag is not None:
-                    bag.result = result  # into run.json when the bag closes
-        except Cancelled:
-            raise
-        except EngineError as e:
-            self._show_error(ctx, action_id, str(e))
-            raise
-        except Exception as e:  # a bug: still say so on the UI, then let the engine report it
-            self._show_error(ctx, action_id, f"Unexpected error ({type(e).__name__}): {e}")
-            raise
+        while True:
+            ctx.update_user_panel(panel_json=ui.progress_panel(action_id, first))
+            try:
+                with self._recording(action_id, params) as bag:
+                    ctx.bag = bag
+                    result = self._act(action_id, params, ctx)
+                    if bag is not None:
+                        bag.result = result  # into run.json when the bag closes
+                break
+            except Cancelled:
+                raise
+            except EngineError as e:
+                # The UI's tap, refused before anything moved: the reason and the same button to try
+                # again (once the user has fixed it). After the arm moved ("STOPPED ..."): Done only.
+                # As microwave's UI flow (feature/14-microwave-close).
+                if action_id == "place_here" and e.recoverable and "STOPPED" not in str(e):
+                    if self._wait_for_button(ctx, ui.retry_panel(str(e)), ui.RETRY):
+                        continue
+                    raise
+                self._show_error(ctx, action_id, str(e))
+                raise
+            except Exception as e:  # a bug: still say so on the UI, then let the engine report it
+                self._show_error(ctx, action_id, f"Unexpected error ({type(e).__name__}): {e}")
+                raise
         if bag is not None:
             self.get_logger().info(f"run recorded: {bag.run_dir} (bag + run.json)")
             result = {**result, "bag_path": str(bag.path), "recording_errors": list(bag.errors)}
@@ -307,20 +325,23 @@ class Capability(CapabilityEngine):
         self._wait_for_button(ctx, ui.error_panel(action_id, message), ui.OK)
 
     def _wait_for_button(self, ctx, panel, button_id):
-        """`panel` on the UI until its `button_id` is tapped, at most ui_error_wait_s (cancel still
-        ends it). Pushed again every second, as microwave_place does (a goal the bridge dropped or
-        aborted reopens). Returns at once if the panel can't be shown (standalone, no bridge)."""
+        """`panel` on the UI until its `button_id` is tapped (True), or ui_error_wait_s passes or the
+        action is cancelled (False). Pushed again only once the UI's goal for it has ended (the bridge
+        dropped or aborted it): re-sending an open panel every second made it flash (microwave, 11-12).
+        False at once if the panel can't be shown (standalone, no bridge)."""
         if not ctx.update_user_panel(panel_json=panel):
-            return
+            return False
         deadline = time.monotonic() + float(self.cfg["ui_error_wait_s"])
         refresh = time.monotonic() + 1.0
         while time.monotonic() < deadline and not ctx.cancelled():
             if ui.is_button(ctx.poll_ui_event(), button_id):
-                return
+                return True
             if time.monotonic() >= refresh:
-                ctx.update_user_panel(panel_json=panel)
+                if not _panel_open(ctx):
+                    ctx.update_user_panel(panel_json=panel)
                 refresh = time.monotonic() + 1.0
             time.sleep(0.1)
+        return False
 
     def _mock(self, action_id, params, ctx):
         """No hardware: place walks through its phases on the panel (ui.MOCK_PHASE_S each), so the
@@ -372,6 +393,12 @@ class Capability(CapabilityEngine):
             # (the engine logs every EngineError's message as an error: /rosout, and a run's bag)
             why = plan.explain_failure(f"{type(e).__name__}: {e}", [action_id])
             raise EngineError(type(e).__name__, why, recoverable=True) from e
+
+    def availability(self, instance_id, world_state):
+        """The UI is offered only place_here (one tap, no params). place / mark / retreat / reset stay
+        callable directly: from the UI, with no params, they would only dry-run (microwave's UI actions
+        do the same, feature/14-microwave-close)."""
+        return [a for a in super().availability(instance_id, world_state) if a.action_id == "place_here"]
 
     # -- actions -------------------------------------------------------------------------------
 

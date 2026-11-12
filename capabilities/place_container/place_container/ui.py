@@ -8,6 +8,8 @@ progress bar; every failure is put on it with an OK button before the action end
 
 OK = "ok"  # the error panel's button
 DONE = "done"  # the one-tap place's "placed" panel's button
+RETRY = "retry"  # the one-tap place's "try again" button, after a refusal before anything moved
+PLACE_HERE = "Place the container here"  # the one-tap action's label: on the UI's action list and the retry
 
 TITLES = {
     "place_here": "Placing the container",
@@ -84,6 +86,16 @@ def placed_panel():
         "message": "The container is on the table and the arm is back at its start.",
         "progress": {"phase": "done", "pct": 100.0, "pausable": False},
         "buttons": [{"button_id": DONE, "label": "Done"}],
+    }
+
+
+def retry_panel(message):
+    """The one-tap place refused before anything moved: the reason (what to fix) and the same button
+    to try again, as microwave's UI flow does."""
+    return {
+        "title": "Unable to place the container",
+        "message": f"{message}. Press {PLACE_HERE} to try again.",
+        "buttons": [{"button_id": RETRY, "label": PLACE_HERE}],
     }
 
 
