@@ -368,3 +368,25 @@ def test_the_contact_moves_are_checked_at_their_ends(model):
     np.testing.assert_allclose(checks[0][2], descent[1][-1])
     meet = model.fk(checks[1][1])[2, 3]
     assert meet == pytest.approx(TABLE_Z + plan.BOWL_DEPTH, abs=plan.PATH_STEP)
+
+
+@needs_model
+def test_the_way_back_is_one_motion_from_the_drop_to_the_start(model):
+    q_start = holding_pose(model, SPOT)
+    _, (zs, qs), _ = plan.plan_place(model, q_start, SPOT, TABLE_Z)
+    q_hold = plan.hold_point(qs, zs, TABLE_Z + plan.BOWL_DEPTH)
+    moves = plan.return_moves(model, q_hold, q_start, drop=0.01)
+    names = [n for n, _, _ in moves]
+    assert names[0] == "drop" and names[-1] == "start" and "retreat" in names
+    by = [near for _, _, near in moves]
+    k = by.index(False)
+    assert all(by[:k]) and not any(by[k:])  # by the container first, then the way up and over
+    z_hold = model.fk(q_hold)[2, 3]
+    assert model.fk(moves[0][1])[2, 3] == pytest.approx(z_hold - 0.01, abs=plan.IK_TOL)  # 1 cm down first
+    tips = [model.fk(q, "tip")[:3, 3] for _, q, _ in moves[1:k]]
+    gaps = [np.linalg.norm(b - a) for a, b in zip(tips, tips[1:], strict=False)]
+    assert all(g <= plan.RETURN_EVERY + 0.01 for g in gaps)  # thinned, not sparse
+    np.testing.assert_allclose(moves[-1][1], q_start)
+    radii = plan.return_radii(model, moves, 0.03)
+    assert len(radii) == len(moves) and radii[-1] == 0.0
+    assert all(r == plan.RETURN_BLEND for r in radii[:k])  # tight by the container

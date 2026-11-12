@@ -565,6 +565,53 @@ def reset_moves(model, q_now, q_start, empty=False, big_turn=False):
     return moves + [("start", np.asarray(q_start, dtype=float))]
 
 
+RETURN_EVERY = 0.015  # m of fingertip travel between the return's waypoints by the container
+RETURN_BLEND = 0.005  # m, blend_radius there: corners cut by at most this close to the lip
+
+
+def return_moves(model, q_hold, q_start, drop=0.0, log=None):
+    """After letting go, the way back to the start as ONE blended motion's joint targets
+    [(name, q, near)]: the drop straight down (`drop` m, if the arm can), the retreat from there
+    (plan_retreat: straight back, or back and the swing; no lift) thinned to every RETURN_EVERY of
+    fingertip travel, then reset_moves' way up and over to the start. `near`: by the container (a
+    tight blend and the slow speed); False from the way up on."""
+    q = np.asarray(q_hold, dtype=float)
+    moves = []
+    if drop > 0:
+        z = float(model.fk(q)[2, 3])
+        try:
+            q = np.asarray(plan_descent(model, q, z - drop)[1][-1], dtype=float)
+            moves.append(("drop", q, True))
+        except Refused as e:
+            if log is not None:
+                log(f"no drop after letting go ({e}): the retreat starts from the hold")
+    line = plan_retreat(model, q, log=log)
+    tips = [model.fk(x, "tip")[:3, 3] for x in line]
+    since = 0.0
+    for k in range(1, len(line)):
+        since += float(np.linalg.norm(tips[k] - tips[k - 1]))
+        if since >= RETURN_EVERY or k == len(line) - 1:
+            moves.append(("retreat" if k == len(line) - 1 else "retreat'", np.asarray(line[k], dtype=float), True))
+            since = 0.0
+    back = reset_moves(model, line[-1], q_start, empty=True)
+    return moves + [(name, q_b, False) for name, q_b in back]
+
+
+def return_radii(model, moves, near):
+    """blend_radius (m) of each of return_moves' targets: RETURN_BLEND by the container; on the way
+    back up and over, reset_radii's rule (`near` once risen clear of the container); 0 at the start,
+    which stops."""
+    k0 = next((i for i, (_, _, by) in enumerate(moves) if not by), len(moves))
+    radii = [RETURN_BLEND] * k0
+    back = [(n, q) for n, q, _ in moves[k0:]]
+    if back:
+        q_from = moves[k0 - 1][1] if k0 else back[0][1]
+        radii += reset_radii(model, q_from, back, near)
+    elif radii:
+        radii[-1] = 0.0
+    return radii
+
+
 def reset_radii(model, q_now, moves, near):
     """blend_radius (m) of each of reset_moves' joint targets for go_to_joint_configs. Waypoints on
     the straight way up are on one line, so passing them is free. The turn toward the start (the

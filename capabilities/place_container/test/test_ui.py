@@ -44,3 +44,12 @@ def test_the_panels_are_json_the_bridge_takes():
     for panel in (ui.progress_panel("place", "carry"), ui.error_panel("mark", "x"), ui.done_panel("place", "Done")):
         assert set(panel) <= {"title", "message", "progress", "buttons"}  # docs/UI_JSON_SCHEMA.md
         json.dumps(panel)
+
+
+def test_the_one_tap_place_ends_with_a_done_button_and_mock_walks_the_real_phases():
+    panel = ui.placed_panel()
+    assert panel["buttons"] == [{"button_id": ui.DONE, "label": "Done"}]
+    assert panel["progress"]["pct"] == 100.0
+    assert ui.is_button({"type": "button", "button_id": ui.DONE}, ui.DONE)
+    assert ui.progress_panel("place_here", "return")["message"].startswith("Backing the hand away")
+    assert ui.MOCK_PHASES[-1] == "return" and ui.title("place_here") == ui.title("place")

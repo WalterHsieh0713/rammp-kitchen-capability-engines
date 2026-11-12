@@ -32,10 +32,11 @@ import time
 
 import numpy as np
 import rammp_arm
-from capability_engine.arm import IMPEDANCE, LATEST_WINS, POSITION, SUCCESSFUL
+from capability_engine.arm import IMPEDANCE, LATEST_WINS, POSITION, SUCCESSFUL, JointTarget
 from rammp_arm import JOINTS, _unwrap_from
 
 from .plan import (
+    RETURN_BLEND,
     Refused,
     VzContact,
     arm_distance,
@@ -47,6 +48,7 @@ from .plan import (
     hold_point,
     plan_descent,
     plan_retreat,
+    return_radii,
 )
 
 LOOSE_TOL_RAD = 0.5  # path/goal tolerance of the impedance moves: the compliant arm lags and is held back
@@ -281,6 +283,27 @@ def sink(arm, model, hold_q, drop, gains, rec, log):
     hold_goal(arm, q, gains)
     wait_still(arm, 3.0, rec=rec)
     return np.asarray(q, dtype=float)
+
+
+def go_back(arm, model, moves, cfg, log):
+    """plan.return_moves' targets as ONE go_to_joint_configs motion in IMPEDANCE (cuRobo plans it
+    around the chair's volumes and blends it; executed compliantly with `cfg["gains"]`, so no mode
+    switch at the container): `return_speed_scale` by the container, `go_to_speed_scale` from the
+    way up on. Then out of impedance on the start's joints. Refused (arm holding in impedance) if
+    the driver refuses or it doesn't arrive."""
+    qs = _unwrap_from(arm.raw_joints(), [q for _, q, _ in moves])
+    radii = return_radii(model, moves, cfg["blend_radius_near"])
+    speeds = [cfg["return_speed_scale"] if near else cfg["go_to_speed_scale"] for _, _, near in moves]
+    targets = [JointTarget(q, blend_radius=r, speed_scale=s) for q, r, s in zip(qs, radii, speeds, strict=True)]
+    names = [n for n, _, _ in moves]
+    log(
+        f"-> back to the start in one motion: {len(moves)} targets ({names[0]} ... {names[-1]}; "
+        f"impedance, go_to_joint_configs, blend {RETURN_BLEND * 1000:.0f} mm by the container)"
+    )
+    if not arm.go_to_joint_configs(targets, "return", control_mode=IMPEDANCE, gains=cfg["gains"]):
+        where = {n: model.fk(q)[:3, 3] for n, q, _ in moves}
+        raise Refused("STOPPED on the way back (gripper open): " + explain_failure(arm.last_error, names, where))
+    exit_impedance(arm, log)
 
 
 def back_out(arm, model, q_start, cfg, rec, log, release=0.0):

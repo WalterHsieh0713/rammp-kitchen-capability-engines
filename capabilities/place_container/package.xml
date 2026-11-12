@@ -11,6 +11,16 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>rclpy</exec_depend>
+  <exec_depend>rosbag2_py</exec_depend>
+  <exec_depend>rosbag2_storage_default_plugins</exec_depend>
+  <exec_depend>message_filters</exec_depend>
+  <exec_depend>tf2_msgs</exec_depend>
+  <exec_depend>diagnostic_msgs</exec_depend>
+  <exec_depend>rcl_interfaces</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>rammp_arm_interfaces</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-scipy</exec_depend>
 

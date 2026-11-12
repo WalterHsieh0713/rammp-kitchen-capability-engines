@@ -4,6 +4,9 @@ Ported from RAMMP-table (place_bowl.py + kinova_arm.py), where it placed the con
 sticky note on the flatbot (2026-10-26). Everything is in arm_mount (x forward, y left, z true up).
 
 Actions:
+  place_here  the UI's one tap (offered on a `table`; no params): place for real at the marked spot and
+           end back at the start. Every action shows its phases and any error on the UI panel and is
+           recorded (a rosbag + run.json, bag.py).
   mark     the closed fingertips touching the target -> saved as the spot (its z = the table). No motion.
   place    the container, gripped by its lip, to the spot ({x, y, table_z}, or the marked one):
              1. adjust: square the hand in place to the nearest hold (level, pointing `pitch_deg` down);
@@ -31,6 +34,7 @@ e-stop whenever allow_execute is on.
     make action CAP=place_container ACTION=place PARAMS='{"execute": false}'
 """
 
+import contextlib
 import json
 import time
 from pathlib import Path
@@ -141,6 +145,28 @@ PARAMS = {
     # a failure is shown on the user's UI panel with an OK button; the action waits this long (s) for
     # the OK before it ends with the error (the panel closes when the action ends). 0 = don't wait
     "ui_error_wait_s": 60.0,
+    # after letting go: "blended" = drop, back out (and swing) and go back to the start as ONE
+    # go_to_joint_configs motion in impedance (cuRobo, blended), so place ends at the start; "legacy"
+    # = the separate drop / back_out moves of 2026-11-10, ending by the container (then reset)
+    "return_mode": "blended",
+    # speed_scale of that motion's legs by the container (the drop and the retreat); the way up and
+    # over to the start goes at go_to_speed_scale
+    "return_speed_scale": 0.3,
+    # a rosbag + run.json for every action run, in <state_dir>/runs/ (bag.py); false = none
+    "record_bag": True,
+    # arm state / scene camera frames per second in the bag
+    "bag_state_hz": 25.0,
+    "bag_frame_hz": 1.0,
+    # the scene camera's colour, camera_info and depth in the bag (context; this capability uses no camera)
+    "bag_camera": True,
+    "bag_camera_topics": [
+        "/scene_camera/color/image_raw",
+        "/scene_camera/color/camera_info",
+        "/scene_camera/depth/image_rect_raw",
+    ],
+    # mock only: place fails at this phase (carry, lower, open, return), to try the UI's error panel
+    # from the UI (which sends no params); "" = none. A goal's own mock_fail wins
+    "mock_fail": "",
 }
 EXECUTE = {"type": "object", "properties": {"execute": {"type": "boolean", "default": False}}}
 PLACE = {
@@ -153,7 +179,7 @@ PLACE = {
         "table_z": {"type": "number"},
         # an empty-gripper test run: don't refuse an open gripper
         "allow_empty_gripper": {"type": "boolean", "default": False},
-        # mock only: fail at this phase (carry, lower, open, retreat) to see the error on the UI
+        # mock only: fail at this phase (carry, lower, open, return) to see the error on the UI
         "mock_fail": {"type": "string"},
     },
 }
@@ -178,6 +204,7 @@ class _PanelContext:
 
     def __init__(self, ctx, action_id, panel=True):
         self._ctx, self._action_id, self._panel = ctx, action_id, panel
+        self.bag = None  # the run's RunBag while it records: each phase goes in it too
 
     def __getattr__(self, name):
         return getattr(self._ctx, name)
@@ -187,14 +214,19 @@ class _PanelContext:
 
     def progress(self, phase, pct, message="", pausable=True):
         self._ctx.progress(phase, pct, message, pausable)
+        if self.bag is not None:
+            self.bag.event("phase", dict(phase=phase, pct=pct, message=message))
         self.update_user_panel(panel_json=ui.progress_panel(self._action_id, phase, message))
 
 
 class Capability(CapabilityEngine):
     display_name = "Place container"
-    perception_classes = []
+    # The UI offers this engine's actions when the user taps a table (perception's class name)
+    perception_classes = ["table"]
     required_resources = ["arm", "gripper"]
     actions = [
+        # The UI's one tap (it sends no params): the place for real, at the marked spot, back to the start
+        Action("place_here", "Place the container here"),
         Action("place", "Place the container on the table", params_schema=PLACE),
         Action("mark", "Save the fingertip position as the spot", params_schema={"type": "object"}),
         Action("retreat", "Back the hand straight out", params_schema=EXECUTE),
@@ -220,10 +252,15 @@ class Capability(CapabilityEngine):
         (with an OK button, waited for up to ui_error_wait_s) before the action ends with it.
         Standalone (no orchestrator, no session token) every panel call is a logged no-op."""
         ctx = _PanelContext(ctx, action_id, panel=self.orchestrated)
-        first = {"place": "plan", "reset": "reset", "retreat": "retreat"}.get(action_id, action_id)
+        first = {"place": "plan", "place_here": "plan", "reset": "reset", "retreat": "retreat"}
+        first = first.get(action_id, action_id)
         ctx.update_user_panel(panel_json=ui.progress_panel(action_id, first))
         try:
-            result = self._act(action_id, params, ctx)
+            with self._recording(action_id, params) as bag:
+                ctx.bag = bag
+                result = self._act(action_id, params, ctx)
+                if bag is not None:
+                    bag.result = result  # into run.json when the bag closes
         except Cancelled:
             raise
         except EngineError as e:
@@ -232,26 +269,65 @@ class Capability(CapabilityEngine):
         except Exception as e:  # a bug: still say so on the UI, then let the engine report it
             self._show_error(ctx, action_id, f"Unexpected error ({type(e).__name__}): {e}")
             raise
-        ctx.update_user_panel(panel_json=ui.done_panel(action_id, "Done"))
+        if bag is not None:
+            self.get_logger().info(f"run recorded: {bag.run_dir} (bag + run.json)")
+            result = {**result, "bag_path": str(bag.path), "recording_errors": list(bag.errors)}
+        if action_id == "place_here":  # the UI's one tap: say it's done, until the user taps Done
+            self._wait_for_button(ctx, ui.placed_panel(), ui.DONE)
+        else:
+            ctx.update_user_panel(panel_json=ui.done_panel(action_id, "Done"))
         return result
 
+    def _recording(self, action_id, params):
+        """The run's RunBag (a context manager), or a no-op one with record_bag off. A recording
+        that can't start refuses the action before anything moves."""
+        if not self.cfg["record_bag"]:
+            return contextlib.nullcontext(None)
+        from .bag import RecordingError, RunBag  # lazy: the planning tests need no rosbag2
+
+        camera = tuple(self.cfg["bag_camera_topics"]) if self.cfg["bag_camera"] else ()
+        try:
+            return RunBag(
+                self,
+                self.state_dir,
+                action_id,
+                params,
+                {k: v for k, v in self.cfg.items() if k != "gains"},
+                camera,
+                frame_hz=float(self.cfg["bag_frame_hz"]),
+                state_hz=float(self.cfg["bag_state_hz"]),
+            )
+        except RecordingError as e:
+            why = f"{e}. Next: check the disk and state_dir, or run with record_bag:=false"
+            raise EngineError("recording", why, recoverable=True) from e
+
     def _show_error(self, ctx, action_id, message):
-        """The failure on the user's panel with an OK button; waits for the OK (at most
-        ui_error_wait_s, cancel still ends it) so it is read before the action ends and the panel
-        closes. Returns at once if the panel can't be shown (standalone, no bridge)."""
-        if not ctx.update_user_panel(panel_json=ui.error_panel(action_id, message)):
+        """The failure on the user's panel with an OK button, waited for (see _wait_for_button) so it
+        is read before the action ends and the panel closes."""
+        self._wait_for_button(ctx, ui.error_panel(action_id, message), ui.OK)
+
+    def _wait_for_button(self, ctx, panel, button_id):
+        """`panel` on the UI until its `button_id` is tapped, at most ui_error_wait_s (cancel still
+        ends it). Pushed again every second, as microwave_place does (a goal the bridge dropped or
+        aborted reopens). Returns at once if the panel can't be shown (standalone, no bridge)."""
+        if not ctx.update_user_panel(panel_json=panel):
             return
         deadline = time.monotonic() + float(self.cfg["ui_error_wait_s"])
+        refresh = time.monotonic() + 1.0
         while time.monotonic() < deadline and not ctx.cancelled():
-            if ui.is_ok(ctx.poll_ui_event()):
+            if ui.is_button(ctx.poll_ui_event(), button_id):
                 return
+            if time.monotonic() >= refresh:
+                ctx.update_user_panel(panel_json=panel)
+                refresh = time.monotonic() + 1.0
             time.sleep(0.1)
 
     def _mock(self, action_id, params, ctx):
         """No hardware: place walks through its phases on the panel (ui.MOCK_PHASE_S each), so the
-        UI can be tried in a sim; `mock_fail` (a phase) ends it there with a refusal instead."""
-        fail = params.get("mock_fail")
-        for phase in ui.MOCK_PHASES if action_id == "place" else ():
+        UI can be tried in a sim; `mock_fail` (a phase; the goal's, else the node parameter) ends it
+        there with a refusal instead."""
+        fail = params.get("mock_fail") or self.cfg["mock_fail"]
+        for phase in ui.MOCK_PHASES if action_id in ("place", "place_here") else ():
             ctx.checkpoint()
             ctx.progress(phase, 0.0)
             if phase == fail:
@@ -273,6 +349,18 @@ class Capability(CapabilityEngine):
             model = plan.Model(self.cfg["flange_to_tip"], self.cfg["pitch_deg"])
             if action_id == "mark":
                 return self._mark(model, log)
+            if action_id == "place_here":
+                # The UI's tap: for real (it sends no params), at the marked spot, back to the start
+                if not self.cfg["allow_execute"]:
+                    raise plan.Refused(
+                        "placing is switched off on this robot (allow_execute is false). Next: start "
+                        "place_container with allow_execute:=true, with someone at the e-stop"
+                    )
+                result = self._place(model, {}, True, ctx, log)
+                if self.cfg["return_mode"] != "blended":  # legacy: the separate reset brings it back
+                    ctx.progress("reset", 0.0)
+                    self._reset(model, {"execute": True, "empty": True}, True, log)
+                return result
             if action_id == "place":
                 return {**self._place(model, params, execute, ctx, log), "note": note}
             if action_id == "retreat":
@@ -386,18 +474,27 @@ class Capability(CapabilityEngine):
             hold_q = lower.lower(self.arm, model, descent, cfg, rec, log)
             ctx.progress("open", 0.0)
             lower.let_go(self.arm, rec, log)
-            time.sleep(0.5)
             drop = self.cfg["release_drop"]
-            hold_q = lower.sink(self.arm, model, hold_q, drop, self.cfg["gains"], rec, log)
-            ctx.progress("retreat", 0.0)
-            # with the drop, the retreat stays down (no lift while the fingers may still be by the lip)
-            release = 0.0 if drop > 0 else self.cfg["hold_press"]
-            lower.back_out(self.arm, model, hold_q, cfg, rec, log, release=release)
+            if self.cfg["return_mode"] == "blended":
+                # the drop, the retreat (and swing) and the way back to the start: ONE blended motion
+                ctx.progress("return", 0.0)
+                moves = plan.return_moves(model, hold_q, q_now, drop=drop, log=log)
+                lower.go_back(self.arm, model, moves, self.cfg, log)
+                self.arm.gripper(1.0)  # ready for the next run, as reset leaves it
+                where = "Back at the start position (position control)."
+            else:
+                time.sleep(0.5)
+                hold_q = lower.sink(self.arm, model, hold_q, drop, self.cfg["gains"], rec, log)
+                ctx.progress("retreat", 0.0)
+                # with the drop, the retreat stays down (no lift while the fingers may still be by the lip)
+                release = 0.0 if drop > 0 else self.cfg["hold_press"]
+                lower.back_out(self.arm, model, hold_q, cfg, rec, log, release=release)
+                where = "The arm is still in impedance mode, by the container."
         finally:
             path = rec.write(self.state_dir / "descents")
             if path is not None:
                 log(f"recorded {len(rec.rows)} /ee_state messages -> {path} (plot: plot_descent.py)")
-        log("Done: container placed, hand clear. The arm is still in impedance mode.")
+        log(f"Done: container placed, hand clear. {where}")
         return {"executed": True, "recording": str(path)}
 
     def _retreat(self, model, execute, log):

@@ -7,14 +7,17 @@ progress bar; every failure is put on it with an OK button before the action end
 """
 
 OK = "ok"  # the error panel's button
+DONE = "done"  # the one-tap place's "placed" panel's button
 
 TITLES = {
+    "place_here": "Placing the container",
     "place": "Placing the container",
     "mark": "Marking the spot",
     "retreat": "Backing the hand away",
     "reset": "Going back to the start",
 }
 FAILED_TITLES = {
+    "place_here": "Couldn't place the container",
     "place": "Couldn't place the container",
     "mark": "Couldn't mark the spot",
     "retreat": "Couldn't back the hand away",
@@ -33,10 +36,11 @@ PHASES = {
     "lower": ("Lowering it onto the table", 45),
     "open": ("Letting go", 70),
     "retreat": ("Backing the hand away", 85),
+    "return": ("Backing the hand away and going back to the start", 85),
     "reset": ("Going back to the start", 50),
 }
 # mock place: the phases it walks through, and how long it shows each (s)
-MOCK_PHASES = ("carry", "lower", "open", "retreat")
+MOCK_PHASES = ("carry", "lower", "open", "return")
 MOCK_PHASE_S = 1.0
 
 
@@ -73,6 +77,21 @@ def error_panel(action_id, message):
     }
 
 
+def placed_panel():
+    """The one-tap place's end: done, until the user taps Done."""
+    return {
+        "title": TITLES["place_here"],
+        "message": "The container is on the table and the arm is back at its start.",
+        "progress": {"phase": "done", "pct": 100.0, "pausable": False},
+        "buttons": [{"button_id": DONE, "label": "Done"}],
+    }
+
+
+def is_button(event, button_id):
+    """Whether a poll_ui_event() result is a tap on `button_id`."""
+    return bool(event) and event.get("type") == "button" and event.get("button_id") == button_id
+
+
 def is_ok(event):
     """Whether a poll_ui_event() result is the error panel's OK."""
-    return bool(event) and event.get("type") == "button" and event.get("button_id") == OK
+    return is_button(event, OK)

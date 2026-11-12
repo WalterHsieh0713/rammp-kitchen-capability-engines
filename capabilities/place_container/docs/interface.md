@@ -10,9 +10,11 @@ Puts the food container, already gripped by its lip, down at a spot on the table
 It squares the hand (level, pointing 5° down), carries the container over to above the spot,
 takes it quickly straight down to just above the table (`lower_from`), lowers the last few cm along
 a straight line in the driver's joint impedance mode until the table stops it, holds a light press
-while the gripper opens, drops the open hand 1 cm (`release_drop`) and backs it out: straight
-back, or, where the elbow runs out of room close to the arm, a short way back and then a 60° turn
-of the hand about the wrist (seen from above) that swings the fingertips off the lip. The spot is
+while the gripper opens, then goes back to its start in ONE blended cuRobo motion, still in
+impedance (`return_mode` blended): the open hand 1 cm down (`release_drop`), backed out (straight
+back, or, where the elbow runs out of room close to the arm, a short way back and then a 60° turn of
+the hand about the wrist, seen from above, that swings the fingertips off the lip), then up and over
+to the start. Every run is recorded (a rosbag and a run.json). The spot is
 given in `arm_mount` (x, y, table height), or marked by touching it with the fingertips (`mark`).
 Finding a free spot from the cameras is not part of it (free-space segmentation belongs in
 rammp-perception, rammp-deployments#96). Without it, the container stays in the hand after the
@@ -45,12 +47,13 @@ Served under `/place_container/`, types from `rammp_orchestrator_interfaces`:
 Every action is a dry run (plan and check, nothing moves) unless the node runs with
 `allow_execute: true` and the goal sets `execute: true`.
 
-| Action    | Params                                                                                              | Result payload                                        |
-| --------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| `place`   | `execute`; `x`, `y`, `table_z` (m, arm_mount; all or none = the marked spot); `allow_empty_gripper` | `{"executed", "plan"}` or `{"executed", "recording"}` |
-| `mark`    | —                                                                                                   | `{"spot": [x, y], "table_z"}`                         |
-| `retreat` | `execute`                                                                                           | `{"executed", "to"}`                                  |
-| `reset`   | `execute`, `save` (save the current joints as the start), `empty` (no tilt check), `big_turn`       | `{"executed", "plan"}` or `{"saved"}`                 |
+| Action       | Params                                                                                              | Result payload                                        |
+| ------------ | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `place_here` | — (the UI's one tap: for real, at the marked spot, back to the start)                               | `{"executed", "recording", "bag_path"}`               |
+| `place`      | `execute`; `x`, `y`, `table_z` (m, arm_mount; all or none = the marked spot); `allow_empty_gripper` | `{"executed", "plan"}` or `{"executed", "recording"}` |
+| `mark`       | —                                                                                                   | `{"spot": [x, y], "table_z"}`                         |
+| `retreat`    | `execute`                                                                                           | `{"executed", "to"}`                                  |
+| `reset`      | `execute`, `save` (save the current joints as the start), `empty` (no tilt check), `big_turn`       | `{"executed", "plan"}` or `{"saved"}`                 |
 
 Progress phases of `place`: `carry` (adjust, lift, transit and the approach down in one blended motion
 through the planned joints; with `blend` false or `adjust_mode` joints, `adjust`, `lift`, `transit` on
@@ -63,16 +66,33 @@ impedance, before it in position control.
 
 ## On the user's UI
 
+The UI offers this engine's actions when the user taps a **table** (`perception_classes`). Its tap
+runs `place_here`: the UI sends no params, so `place_here` places for real (the node must run with
+`allow_execute: true`) at the marked spot, and ends back at the start.
+
 Every action puts a panel on the UI bridge (`ctx.update_user_panel`, PR #42): a title ("Placing the
 container", ...), the phase in words (checking the plan, carrying it over, lowering it onto the
-table, letting go, backing the hand away) and a progress bar. A failure is shown there with its full
-reason (what happened, where, what to do next) and an OK button; the action waits for the OK (at
-most `ui_error_wait_s`) before it ends with the error, because the panel closes when the action
-ends. Standalone (no orchestrator, so no session token) the panel calls are logged no-ops.
+table, letting go, backing the hand away and going back to the start) and a progress bar.
+`place_here` ends with "The container is on the table" and a Done button. A failure is shown with
+its full reason (what happened, where, what to do next) and an OK button. The action waits for the
+tap (at most `ui_error_wait_s`; the panel is pushed again every second, as microwave_place does)
+before it ends, because the panel closes when the action ends. Standalone (no orchestrator, so no
+session token) there is no panel.
 
-In mock (`mock: true`), `place` walks through its phases on the panel, 1 s each, without hardware,
-and `mock_fail` (a phase: `carry`, `lower`, `open` or `retreat`) ends it there with a refusal, to
-try the error panel in a sim.
+In mock (`mock: true`), `place` and `place_here` walk through their phases on the panel, 1 s each,
+without hardware; `mock_fail` (a phase: `carry`, `lower`, `open` or `return`; a goal param, or the
+node parameter for a run started from the UI) ends it there with a refusal, to try the error panel.
+
+## Recorded runs
+
+Every action run writes `<state_dir>/runs/<action>_<UTC time>_<id>/` (on flatbot
+`~/.place_container/runs/`): `bag/` (sqlite3) with `/joint_states`, `/ee_state`, `/gripper_state` at
+`bag_state_hz`, `/tf`, `/tf_static`, `/arm/robot_description`, `/diagnostics`, `/rosout` (this node's
+whole log, other nodes' warnings and errors), the scene camera's colour, camera_info and depth at
+`bag_frame_hz` (`bag_camera`), and `/place_container/run_event` (JSON: started, each phase, the
+outcome); and `run.json`: the params, the config, succeeded / failed / cancelled, the error and its
+traceback, the message counts. A recording that can't start refuses the action before anything
+moves. The result payload carries `bag_path`. (`bag.py`, adapted from microwave_place's RunBag.)
 
 ## Collision volumes
 
@@ -132,6 +152,13 @@ contact arming 2026-11-10).
 | `state_dir`              | `"/config/place_container"`                  | Where the marked spot, start position and descent recordings are kept                                                                                                                |
 | `state_valid_after`      | `1794074180.0`                               | A spot or start position saved before this (unix s) is refused: when the arm moved on the chair                                                                                      |
 | `ui_error_wait_s`        | `60.0`                                       | A failure waits this long for the OK on the UI panel before the action ends with it (s); 0 = don't wait                                                                              |
+| `return_mode`            | `"blended"`                                  | After letting go: `blended` = drop, back out and back to the start as one impedance cuRobo motion; `legacy` = the separate moves, ending by the container                            |
+| `return_speed_scale`     | `0.3`                                        | speed_scale of that motion's legs by the container; the way up and over goes at `go_to_speed_scale`                                                                                  |
+| `record_bag`             | `true`                                       | A rosbag + run.json for every action run in `<state_dir>/runs/`                                                                                                                      |
+| `bag_state_hz`           | `25.0`                                       | Arm state messages per second in the bag                                                                                                                                             |
+| `bag_frame_hz`           | `1.0`                                        | Scene camera frames per second in the bag                                                                                                                                            |
+| `bag_camera`             | `true`                                       | Record the scene camera (`bag_camera_topics`: colour, camera_info, depth) for context                                                                                                |
+| `mock_fail`              | `""`                                         | Mock only: place fails at this phase (`carry`, `lower`, `open`, `return`), to try the UI's error panel                                                                               |
 | `ui_bridge_node_name`    | `"ui_bridge_node"`                           | The UI bridge node the panel talks to (declared by the engine)                                                                                                                       |
 
 `self.arm` reads these `arm.*` parameters once at startup and refuses changes
