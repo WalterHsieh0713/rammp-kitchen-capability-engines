@@ -148,7 +148,7 @@ PARAMS = {
     # after letting go: "blended" = drop, back out (and swing) and go back to the start as ONE
     # go_to_joint_configs motion in impedance (cuRobo, blended), so place ends at the start; "legacy"
     # = the separate drop / back_out moves of 2026-11-10, ending by the container (then reset)
-    "return_mode": "blended",
+    "return_mode": "legacy",
     # speed_scale of that motion's legs by the container (the drop and the retreat); the way up and
     # over to the start goes at go_to_speed_scale
     "return_speed_scale": 0.3,
@@ -744,6 +744,16 @@ class Capability(CapabilityEngine):
                 raise plan.Refused(
                     f"cuRobo check of {label}: " + plan.explain_failure(f"{type(e).__name__}: {e}", [label])
                 ) from e
+            if not res.success and "VALIDATION_FAILED" in str(res.message):
+                # cuRobo validates its trajectory only once it has accepted both ends as clear (a colliding
+                # end fails earlier, INVALID_START/GOAL_STATE_WORLD_COLLISION), and the move runs on
+                # move_joints, not this trajectory: a rejected trajectory (flatbot 2026-11-12, the retreat:
+                # J2 acceleration 25.3-25.5 > 25.0, every time) says nothing about the chair
+                log(
+                    f"cuRobo check: the end of {label} is clear of the chair's collision volumes (cuRobo's own "
+                    f"trajectory for it failed its validation, not used: {res.message})"
+                )
+                continue
             if not res.success:
                 where = {label: model.fk(q_to)[:3, 3]}
                 raise plan.Refused(

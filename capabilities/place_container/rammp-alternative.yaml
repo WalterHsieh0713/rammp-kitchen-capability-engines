@@ -108,10 +108,11 @@ params:
   # A failure is shown on the user's UI panel with an OK button; the action waits this long (s) for
   # the OK before it ends with the error. 0 = don't wait.
   ui_error_wait_s: 60.0
-  # After letting go: blended = drop, back out (and swing) and go back to the start as ONE impedance
-  # go_to_joint_configs motion (cuRobo, blended), so place ends at the start; legacy = the separate
-  # moves of 2026-11-10, ending by the container.
-  return_mode: blended
+  # After letting go: legacy = the slow separate moves of 2026-11-10 (drop, back out, swing), ending
+  # by the container (the UI's place_here then runs reset); blended = drop, back out and go back to the
+  # start as ONE impedance go_to_joint_configs motion (cuRobo, blended). legacy since 2026-11-12: cuRobo
+  # rejected its own plan of the short retreat (J2 acceleration) every time on flatbot.
+  return_mode: legacy
   # speed_scale of that motion's legs by the container; the way up and over goes at go_to_speed_scale.
   return_speed_scale: 0.3
   # A rosbag + run.json for every action run in <state_dir>/runs/ (place_container/bag.py).

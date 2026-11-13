@@ -10,11 +10,12 @@ Puts the food container, already gripped by its lip, down at a spot on the table
 It squares the hand (level, pointing 5° down), carries the container over to above the spot,
 takes it quickly straight down to just above the table (`lower_from`), lowers the last few cm along
 a straight line in the driver's joint impedance mode until the table stops it, holds a light press
-while the gripper opens, then goes back to its start in ONE blended cuRobo motion, still in
-impedance (`return_mode` blended): the open hand 1 cm down (`release_drop`), backed out (straight
-back, or, where the elbow runs out of room close to the arm, a short way back and then a 60° turn of
-the hand about the wrist, seen from above, that swings the fingertips off the lip), then up and over
-to the start. Every run is recorded (a rosbag and a run.json). The spot is
+while the gripper opens, then, still in impedance and slowly, takes the open hand 1 cm down
+(`release_drop`) and backs it out (straight back, or, where the elbow runs out of room close to the
+arm, a short way back and then a 60° turn of the hand about the wrist, seen from above, that swings
+the fingertips off the lip), ending by the container; `reset` takes it back to the start (the UI's
+one tap runs it). `return_mode` blended makes the back-out and the way back to the start ONE blended
+cuRobo motion instead (not the default: on flatbot cuRobo rejected its own plan of the short retreat). Every run is recorded (a rosbag and a run.json). The spot is
 given in `arm_mount` (x, y, table height), or marked by touching it with the fingertips (`mark`).
 Finding a free spot from the cameras is not part of it (free-space segmentation belongs in
 rammp-perception, rammp-deployments#96). Without it, the container stays in the hand after the
@@ -155,7 +156,7 @@ contact arming 2026-11-10).
 | `state_dir`              | `"/config/place_container"`                  | Where the marked spot, start position and descent recordings are kept                                                                                                                |
 | `state_valid_after`      | `1794074180.0`                               | A spot or start position saved before this (unix s) is refused: when the arm moved on the chair                                                                                      |
 | `ui_error_wait_s`        | `60.0`                                       | A failure waits this long for the OK on the UI panel before the action ends with it (s); 0 = don't wait                                                                              |
-| `return_mode`            | `"blended"`                                  | After letting go: `blended` = drop, back out and back to the start as one impedance cuRobo motion; `legacy` = the separate moves, ending by the container                            |
+| `return_mode`            | `"legacy"`                                   | After letting go: `legacy` = the slow separate moves, ending by the container; `blended` = drop, back out and back to the start as one impedance cuRobo motion                       |
 | `return_speed_scale`     | `0.3`                                        | speed_scale of that motion's legs by the container; the way up and over goes at `go_to_speed_scale`                                                                                  |
 | `record_bag`             | `true`                                       | A rosbag + run.json for every action run in `<state_dir>/runs/`                                                                                                                      |
 | `bag_state_hz`           | `25.0`                                       | Arm state messages per second in the bag                                                                                                                                             |

@@ -56,10 +56,11 @@ MAX_LOWER_TILT_DEG = 1.0  # ... and on the straight way down
 # --- checks ---
 IK_TOL = 0.005  # m
 IK_ROT_TOL_DEG = 1.0
-# rad: IK answers stay this far inside each joint limit -- the driver's joint_limit_margin_rad, which
-# refuses a goal any closer (GOAL_IN_LIMIT_MARGIN). Without it the solver pins a joint ON its limit
-# and a retreat that ran out of elbow room looked complete (flatbot, 2026-11-10: J4 at 2.570).
-LIMIT_MARGIN = 0.10
+# rad: IK answers stay this far inside each joint limit -- the driver's joint_limit_margin_rad (0.10),
+# which refuses a goal any closer (GOAL_IN_LIMIT_MARGIN), plus 0.02 of slack: the solver pins a joint ON
+# its bound, and at exactly 0.10 the driver refused it (flatbot, 2026-11-12: J6 at the retreat's end).
+# Without any margin a retreat that ran out of elbow room looked complete (2026-11-10: J4 at 2.570).
+LIMIT_MARGIN = 0.12
 MAX_STEP_JUMP_DEG = 120.0  # one joint move
 UP = np.array([0.0, 0.0, 1.0])
 
